@@ -1,0 +1,50 @@
+event: ready
+data: {"request_message_id":3,"response_message_id":4,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1792240132.1185439}
+
+data: {"v":{"response":{"message_id":4,"parent_id":3,"model":"","role":"ASSISTANT","thinking_enabled":false,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":42,"feedback":null,"inserted_at":1792240132.1049209,"search_enabled":true,"fragments":[{"id":2,"type":"RESPONSE","content":"You","references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"'re"}
+
+data: {"v":" welcome"}
+
+data: {"v":"!"}
+
+data: {"v":" Let"}
+
+data: {"v":" me"}
+
+data: {"v":" know"}
+
+data: {"v":" if"}
+
+data: {"v":" there"}
+
+data: {"v":"'s"}
+
+data: {"v":" anything"}
+
+data: {"v":" else"}
+
+data: {"v":" I"}
+
+data: {"v":" can"}
+
+data: {"v":" help"}
+
+data: {"v":" with"}
+
+data: {"v":"."}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":79},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1792240132.237546}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

@@ -5,7 +5,7 @@ const context = await chromium.launchPersistentContext(
         channel: "msedge",
         headless: false,
         chromiumSandbox: true,
-        args: ["--test-type"]
+        args: ["--test-type"] // 抑制不受支持的命令行标志警告提示条
     }
 );
 
