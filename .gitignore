@@ -1,3 +1,6 @@
+# runtime data
+.deepseek-profile/
+
 # dependencies (bun install)
 node_modules
 

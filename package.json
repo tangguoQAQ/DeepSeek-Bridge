@@ -1,15 +1,22 @@
 {
-  "name": "deepseekbridge",
+  "name": "deepseek-bridge",
   "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "typecheck": "bun check"
+    "typecheck": "bun check",
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "hono": "^4.13.13",
+    "patchright": "^1.64.1",
+    "zod": "^4.6.7"
   }
 }

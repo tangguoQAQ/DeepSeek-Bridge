@@ -1,4 +1,4 @@
-# deepseekbridge
+# deepseek-bridge
 
 To install dependencies:
 
