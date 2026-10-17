@@ -133,7 +133,8 @@ export function applyDelta(doc: unknown, delta: Delta): unknown {
         if(typeof cur === "string") {
             node[key] = cur + delta.value;
         } else if(Array.isArray(cur)) {
-            cur.push(delta.value);
+            // v is the list of elements to merge in (fragments case) -> concat semantics
+            node[key] = cur.concat(delta.value);
         } else {
             throw new Error("Cannot append to non-string and non-array");
         }
@@ -159,6 +160,7 @@ function resolveIndex(arr: unknown[], key: string): number {
 
 export interface CompletionOutcome {
     text: string; // body (RESPONSE fragments concatenated)
+    reasoning: string; // THINK fragments concatenated
     completionTokens: number; // accumulated_token_usage
     finished: boolean;
     closed: boolean; // received close event
@@ -207,6 +209,8 @@ export function reduceSSE(sseText: string)
     const fragments = response?.fragments ?? [];
     return {
         text: fragments.filter((f) => f.type === "RESPONSE")
+            .map((f) => f.content ?? "").join(""),
+        reasoning: fragments.filter((f) => f.type === "THINK")
             .map((f) => f.content ?? "").join(""),
         completionTokens: response?.accumulated_token_usage ?? 0,
         finished: response?.status === "FINISHED"

@@ -53,3 +53,31 @@ test("SSE 框架：CRLF、多行 data、无尾空行的末块", () => {
         { event: "", data: "{}" },
     ]);
 });
+
+test("thinking fixture：THINK / RESPONSE 分流", async () => {
+    const r = reduceSSE(await readFixture("completion-thinking-sample.txt"));
+    expect(r.reasoning).toContain("9.11");
+    expect(r.reasoning.length).toBeGreaterThan(100);
+    expect(r.text).toBe("9.9 大，因为把 9.9 写成 9.90 后，十分位 9 大于 9.11 的十分位 1。");
+    expect(r.completionTokens).toBe(112);
+    expect(r.finished).toBe(true);
+    expect(r.title).toBe("9.9大于9.11");
+});
+
+test("search fixture：SEARCH 片段不污染正文", async () => {
+    const r = reduceSSE(await readFixture("completion-search-sample.txt"));
+    expect(r.text).toContain("DeepSeek-V4.1-Flash-1017");
+    expect(r.text).toContain("[citation:1]");
+    expect(r.reasoning).toBe("");
+    expect(r.completionTokens).toBe(97);
+    expect(r.finished).toBe(true);
+    expect(r.title).toBe("DeepSeek发布新模型");
+});
+
+test("数组 APPEND 为 concat 合并（fragments 场景）", () => {
+    let doc: unknown = { response: { fragments: [{ type: "THINK", content: "t" }] } };
+    doc = applyDelta(doc, { path: "response/fragments", op: "APPEND", value: [{ type: "RESPONSE", content: "r" }] });
+    const frags = (doc as any).response.fragments;
+    expect(frags.length).toBe(2);
+    expect(frags[1].content).toBe("r");
+});

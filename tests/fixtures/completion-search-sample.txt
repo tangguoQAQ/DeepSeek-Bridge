@@ -1,0 +1,131 @@
+event: ready
+data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1792252273.935843}
+
+data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":false,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":0,"feedback":null,"inserted_at":1792252273.924232,"search_enabled":true,"fragments":[{"id":2,"type":"SEARCH","status":"WIP","content":null,"queries":[{"query":"DeepSeek 在2026年10月发布了什么新模型"},{"query":"site:deepseek.com 2026年10月 新模型发布"}],"results":[]}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":true,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/results","v":[{"url":"https://stcn.com/article/detail/4223928.html","title":"DeepSeek V4.1 Flash新版本发布 许愿式编程一键成真","snippet":"人民财讯10月17日电，DeepSeek消息，DeepSeek V4.1 Flash现已更新至V4.1-Flash-1017版本，官方网页端、APP与API模型已同步变更为新模型。","cite_index":1,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/stcn.com","site_name":"证券时报","query_indexes":[0],"provider":null},{"url":"https://api-docs.deepseek.com/news/news260910/#1","title":"DeepSeek-V4.1-Flash: Smarter, Faster, More Efficient | DeepSeek API Docs - DeepSeek-V4.1-Flash: Smarter, Faster, More Efficient","snippet":"DeepSeek-V4.1-Flash ... 🔹 Starting at 04:00 UTC on Sept 14, 2026, alldeepseek-v4-pro requests will route to V4.1-Flash at V4.1-Flash rates.","cite_index":2,"published_at":1788969600.0,"site_icon":"https://cdn.deepseek.com/site-icons/deepseek.com","site_name":"DeepSeek","query_indexes":[1],"provider":null},{"url":"https://finance.sina.com.cn/roll/2026-10-17/doc-inivpwwh1330849.shtml","title":"DeepSeek新模型：更聪明，还更省钱","snippet":"10月17日，国产大模型厂商DeepSeek低调完成了一次关键版本迭代。 据DeepSeek官方API文档及更新日志，DeepSeek V4.1 Flash已正式升级至DeepSeek-V4.1-Flash-1017，网页端、App与API三端模型同步切换。","cite_index":3,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/sina.com.cn","site_name":"新浪财经","query_indexes":[0],"provider":null},{"url":"https://m.bjnews.com.cn/detail/1792228837129628.html","title":"DeepSeek V4.1 Flash新版本发布","snippet":"DeepSeek V4.1 Flash新版本发布 ... 新京报贝壳财经讯（记者罗亦丹）10月17日，DeepSeek在官方公号发文称，DeepSeek V4.1 Flash现已更新至V4.1-Flash-1017版本，官方网页端、APP与API模型已同步变更为新模型。","cite_index":4,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/bjnews.com.cn","site_name":"新京报","query_indexes":[0],"provider":null},{"url":"https://www.163.com/dy/article/L9F8LV3I0511CPVM.html","title":"DeepSeek V4.1 Flash新版本发布 许愿式编程一键成真 网友怒赞：太上进 超级斩杀线","snippet":"快科技10月17日消息，据DeepSeek官方公众号今日消息，DeepSeek V4.1 Flash现已更新至V4.1-Flash-1017版本，官方网页端、APP与API模型已同步变更为新模型。","cite_index":5,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/163.com","site_name":"网易","query_indexes":[0],"provider":null},{"url":"https://36kr.com/newsflashes/4029763615986052","title":"DeepSeek V4.1 Flash新版本发布-36氪","snippet":"DeepSeek V4.1 Flash新版本发布 2026-10-17 17 ... 36氪获悉，据DeepSeek消息，DeepSeek V4.1 Flash现已更新至V4.1-Flash-1017版本，官方网页端、App与API模型已同步变更为新模型。原文链接","cite_index":6,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/36kr.com","site_name":"36氪","query_indexes":[0],"provider":null},{"url":"https://www.itsdw.cn/news/36522.html","title":"DeepSeek V4.1 Flash-1017版正式发布","snippet":"DeepSeek V4.1 Flash-1017版正式发布 ... IT时代网10月17日消息，国产大模型厂商 DeepSeek 旗下 V4.1 Flash 模型已更新至 V4.1-Flash-1017 版本，官方网页端、APP 与 API 模型同步变更为新模型，API 调用方式与价格保持不变，仍使用 deepseek-flash 即可访问最新模型。","cite_index":7,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/itsdw.cn","site_name":"","query_indexes":[0],"provider":null},{"url":"https://tech.ifeng.com/c/8xIg4YWs1OM","title":"DeepSeek新模型登场，用户要给AI付的钱又少了","snippet":"DeepSeek新模型登场，用户要给AI付的钱又少了 ... 在一场大崩溃之后，宕机的真相水落石出，10月17日，DeepSeek V4.1 Flash-1017正式登场。","cite_index":8,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/ifeng.com","site_name":"凤凰网科技","query_indexes":[0],"provider":null},{"url":"https://m.thepaper.cn/newsDetail_forward_34271780","title":"DeepSeek新模型发布，性能涨了费用降了，许愿式编程成真","snippet":"2026-10-17 19:54  上海  前两天DeepSeek“先宕机后补偿”，就有人猜：“D老师”要有新动作了？结果大周末的新模型DeepSeek-V4.1-Flash-1017火速上桌。目前官方网页端、APP与API模型已同步变更为新版本。  换上新模型后，DeepSeek Harness也升级到0.2.1版本。官方说法是：新模型训练时针对DeepSeek Harness进行了专项优化，在","cite_index":9,"published_at":1792166400.0,"site_icon":"https://cdn.deepseek.com/site-icons/thepaper.cn","site_name":"澎湃新闻","query_indexes":[0],"provider":null}]}
+
+data: {"p":"response/fragments/-1","o":"BATCH","v":[{"p":"status","v":"FINISHED"},{"p":"content","v":"Found 9 web pages"}]}
+
+data: {"p":"response/conversation_mode","o":"SET","v":"SEARCH"}
+
+data: {"p":"response/has_pending_fragment","v":true}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Deep","references":[],"stage_id":2}]},{"p":"has_pending_fragment","o":"SET","v":false}]}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"Se"}
+
+data: {"v":"ek"}
+
+data: {"v":" "}
+
+data: {"v":"最近"}
+
+data: {"v":"发布了"}
+
+data: {"v":" **"}
+
+data: {"v":"Deep"}
+
+data: {"v":"Se"}
+
+data: {"v":"ek"}
+
+data: {"v":"-V"}
+
+data: {"v":"4"}
+
+data: {"v":"."}
+
+data: {"v":"1"}
+
+data: {"v":"-F"}
+
+data: {"v":"lash"}
+
+data: {"v":"-"}
+
+data: {"v":"101"}
+
+data: {"v":"7"}
+
+data: {"v":"**"}
+
+data: {"v":" "}
+
+data: {"v":"新"}
+
+data: {"v":"版本"}
+
+data: {"v":"模型"}
+
+data: {"v":"，"}
+
+data: {"v":"重点"}
+
+data: {"v":"提升了"}
+
+data: {"v":"“"}
+
+data: {"v":"许"}
+
+data: {"v":"愿"}
+
+data: {"v":"式"}
+
+data: {"v":"编程"}
+
+data: {"v":"”"}
+
+data: {"v":"能力"}
+
+data: {"v":"，"}
+
+data: {"v":"可从"}
+
+data: {"v":"零"}
+
+data: {"v":"构建"}
+
+data: {"v":"游戏"}
+
+data: {"v":"开发"}
+
+data: {"v":"、"}
+
+data: {"v":"3"}
+
+data: {"v":"D"}
+
+data: {"v":"建模"}
+
+data: {"v":"等"}
+
+data: {"v":"完整"}
+
+data: {"v":"项目"}
+
+data: {"v":"[citation:1]"}
+
+data: {"v":"[citation:4]"}
+
+data: {"v":"[citation:9]"}
+
+data: {"v":"。"}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":97},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1792252274.939942}
+
+event: title
+data: {"content":"DeepSeek发布新模型"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

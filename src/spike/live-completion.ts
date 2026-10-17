@@ -3,6 +3,12 @@
 
 import { chromium } from "patchright";
 
+// 用法: bun run src/spike/live-completion.ts [chat|thinking|search]
+const mode = process.argv[2] ?? "chat";
+if (!["chat", "thinking", "search"].includes(mode)) {
+    throw new Error("mode 只支持 chat / thinking / search");
+}
+
 // ===== 1. 进程内 wasm 求解器（与 pow-solve.ts 相同） =====
 
 const wasmBytes = await Bun.file("assets/sha3_wasm_bg.wasm").arrayBuffer();
@@ -114,8 +120,12 @@ try {
 
     // ===== 5. 发 completion，页面内读完整条 SSE =====
 
+    const prompt = 
+        mode === "thinking" ? "用一句话推理：9.11 和 9.9 哪个大？" :
+        mode === "search" ? "用一句话回答：DeepSeek 最近发布了什么新模型？" :
+        "用一句话回答：1+1等于几？";
     const t1 = performance.now();
-    const out = await page.evaluate(async (arg: { token: string; sessionId: string; powHeader: string }) => {
+    const out = await page.evaluate(async (arg: { token: string; sessionId: string; powHeader: string; prompt: string; thinkingEnabled: boolean; searchEnabled: boolean }) => {
         const res = await fetch("/api/v0/chat/completion", {
             method: "POST",
             headers: {
@@ -127,10 +137,10 @@ try {
                 chat_session_id: arg.sessionId,
                 parent_message_id: null,
                 model_type: "default",
-                prompt: "用一句话回答：1+1等于几？",
+                prompt: arg.prompt,
                 ref_file_ids: [],
-                thinking_enabled: false,
-                search_enabled: false,
+                thinking_enabled: arg.thinkingEnabled,
+                search_enabled: arg.searchEnabled,
                 action: null,
                 preempt: false,
             }),
@@ -152,7 +162,7 @@ try {
         }
         try { await reader.cancel(); } catch {}
         return { status, ct, text };
-    }, { token, sessionId: boot.sessionId, powHeader });
+    }, { token, sessionId: boot.sessionId, powHeader, prompt, thinkingEnabled: mode === "thinking", searchEnabled: mode === "search" });
 
     const totalMs = (performance.now() - t1).toFixed(0);
     console.log(`\n===== completion: HTTP ${out.status} (${out.ct}) · ${out.text.length} 字符 · ${totalMs}ms =====`);
@@ -160,10 +170,13 @@ try {
     console.log(lines.slice(0, 100).join("\n"));
     if (lines.length > 100) console.log(`…（还有 ${lines.length - 100} 行）`);
 
+    const fixture = mode === "chat"
+        ? "tests/fixtures/completion-live-sample.txt"
+        : `tests/fixtures/completion-${mode}-sample.txt`;
     const ok = out.text.includes('"FINISHED"') && out.text.includes("event: close");
     if (ok) {
-        await Bun.write("tests/fixtures/completion-live-sample.txt", out.text);
-        console.log("\n🎉 端到端打通！SSE 原文已存 tests/fixtures/completion-live-sample.txt");
+        await Bun.write(fixture, out.text);
+        console.log(`\n🎉 端到端打通！SSE 原文已存 ${fixture}`);
     } else {
         console.log("\n⚠️ 未看到 FINISHED + close，检查上面的原始响应");
     }
