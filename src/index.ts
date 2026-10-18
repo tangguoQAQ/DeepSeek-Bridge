@@ -1,14 +1,35 @@
-import { Hono } from "hono";
-import { chromium } from "patchright";
-import { z } from "zod";
+import { parseConfig } from "./config";
+import { createApp } from "./server/app";
+import type { BridgeConfig } from "./config";
+import type { BridgeState } from "./server/app";
 
-const runtime = typeof Bun === "object" ?
-    `Bun ${Bun.version}` : `Node ${process.version}`;
-console.log(`Runtime: ${runtime}`);
+let config: BridgeConfig;
+try {
+    config = parseConfig(Bun.argv.slice(2));
+} catch(err) {
+    console.error(`dsbridge: ${(err as Error).message}`);
+    process.exit(1);
+}
 
-const ok = (name: string, pass: boolean) =>
-    console.log(`${pass ? "✅" : "❌"} ${name}`);
+const state: BridgeState = {
+    status: "BOOT",
+    startedAt: Date.now(),
+    lastError: null
+};
 
-ok("hono imported", typeof Hono === "function");
-ok("patchright imported", typeof chromium.launch === "function");
-ok("zod imported", typeof z.object === "function");
+const app = createApp(config, state);
+
+const server = Bun.serve({
+    hostname: config.host,
+    port: config.port,
+    idleTimeout: 120,
+    fetch: app.fetch
+});
+
+console.log(`
+DeepSeekBridge → http://${server.hostname}:${server.port}
+  GET /healthz    健康检查
+  GET /v1/models  模型列表
+  token: ${config.token === null ? "disabled" : "enabled"}
+仅供个人学习研究，请遵守 DeepSeek 服务条款。
+`);
