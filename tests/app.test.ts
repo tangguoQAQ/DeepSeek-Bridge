@@ -21,15 +21,21 @@ function makeState(): BridgeState {
 }
 
 const okBackend: ChatBackend = {
-    chat: async () => ({
-        text: "1+1等于2。",
-        reasoning: "",
-        completionTokens: 48,
-        finished: true,
-        closed: true,
-        title: "一加一等于二",
-        responseMessageId: 2,
-    }),
+    chat: async function*() {
+        yield { type: "text", text: "1+1等于2。" };
+        yield {
+            type: "done",
+            outcome: {
+                text: "1+1等于2。",
+                reasoning: "",
+                completionTokens: 48,
+                finished: true,
+                closed: true,
+                title: "一加一等于二",
+                responseMessageId: 2,
+            },
+        };
+    },
 };
 
 const HEADERS = {
@@ -58,6 +64,22 @@ test("POST /v1/chat/completions：200 + usage 头 + 内容", async () => {
     expect(payload.model).toBe("deepseek-chat");
     expect(payload.choices[0].message.content).toBe("1+1等于2。");
     expect(payload.usage.completion_tokens).toBe(48);
+});
+
+test("POST /v1/chat/completions stream=true：text/event-stream + [DONE]", async () => {
+    const app = createApp(config, makeState(), new SerialQueue(4, 0), () => okBackend);
+    const res = await post(app, JSON.stringify({
+        model: "deepseek-chat",
+        stream: true,
+        messages: [{ role: "user", content: "1+1" }],
+    }));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain('"content":"1+1等于2。"');
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text.indexOf("data: [DONE]")).toBeGreaterThan(text.indexOf('"finish_reason":"stop"'));
 });
 
 test("未就绪：backend 为 null → 503", async () => {

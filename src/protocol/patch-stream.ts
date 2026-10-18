@@ -175,48 +175,102 @@ interface ResponseNode {
     fragments?: Array<{ type?: string; content?: string }>;
 }
 
-export function reduceSSE(sseText: string)
-    : CompletionOutcome {
-    const deltaParser = new DeltaParser();
-    let doc: unknown = {};
-    let title: string | null = null;
-    let responseMessageId: number | null = null;
-    let closed = false;
+export type CompletionDelta =
+    | { type: "text"; text: string }
+    | { type: "reasoning"; text: string };
 
-    for(const ev of parseSSE(sseText)) {
+// 增量解析（M3 流式）：SSE 文本块推入 → text/reasoning 增量；outcome() 汇总（reduceSSE 基于它实现）
+export class CompletionStream {
+    private readonly sse = new SSEParser();
+    private readonly deltaParser = new DeltaParser();
+    private doc: unknown = {};
+    private textLen = 0;
+    private reasoningLen = 0;
+    private closedFlag = false;
+    private titleValue: string | null = null;
+    private messageId: number | null = null;
+
+    push(chunk: string): CompletionDelta[] {
+        return this.consume(this.sse.push(chunk));
+    }
+
+    flush(): CompletionDelta[] {
+        return this.consume(this.sse.flush());
+    }
+
+    outcome(): CompletionOutcome {
+        const response = (this.doc as { response?: ResponseNode } | null)?.response;
+        const { text, reasoning } = extractStrings(this.doc);
+        return {
+            text,
+            reasoning,
+            completionTokens: response?.accumulated_token_usage ?? 0,
+            finished: response?.status === "FINISHED"
+                || response?.quasi_status === "FINISHED",
+            closed: this.closedFlag,
+            title: this.titleValue,
+            responseMessageId: this.messageId
+        };
+    }
+
+    private consume(events: SSEEvent[]): CompletionDelta[] {
+        const out: CompletionDelta[] = [];
+        for(const ev of events) {
+            this.handleEvent(ev, out);
+        }
+        return out;
+    }
+
+    private handleEvent(ev: SSEEvent, out: CompletionDelta[]): void {
         if(ev.event === "") {
             const raw = JSON.parse(ev.data) as RawDelta;
-            for(const delta of deltaParser.parse(raw)) {
-                doc = applyDelta(doc, delta);
+            for(const delta of this.deltaParser.parse(raw)) {
+                this.doc = applyDelta(this.doc, delta);
             }
+            this.emitGrowth(out);
         } else if(ev.event === "ready") {
             const json = JSON.parse(ev.data) as {
                 response_message_id?: number
             };
-            responseMessageId = json.response_message_id ?? null;
+            this.messageId = json.response_message_id ?? null;
         } else if(ev.event === "title") {
             const json = JSON.parse(ev.data) as {
                 content?: string
             };
-            title = json.content ?? null;
+            this.titleValue = json.content ?? null;
         } else if(ev.event === "close") {
-            closed = true;
+            this.closedFlag = true;
         }
         // Ignore other events
     }
 
+    private emitGrowth(out: CompletionDelta[]): void {
+        const { text, reasoning } = extractStrings(this.doc);
+        if(reasoning.length > this.reasoningLen) {
+            out.push({ type: "reasoning", text: reasoning.slice(this.reasoningLen) });
+            this.reasoningLen = reasoning.length;
+        }
+        if(text.length > this.textLen) {
+            out.push({ type: "text", text: text.slice(this.textLen) });
+            this.textLen = text.length;
+        }
+    }
+}
+
+function extractStrings(doc: unknown): { text: string; reasoning: string } {
     const response = (doc as { response?: ResponseNode } | null)?.response;
     const fragments = response?.fragments ?? [];
     return {
         text: fragments.filter((f) => f.type === "RESPONSE")
             .map((f) => f.content ?? "").join(""),
         reasoning: fragments.filter((f) => f.type === "THINK")
-            .map((f) => f.content ?? "").join(""),
-        completionTokens: response?.accumulated_token_usage ?? 0,
-        finished: response?.status === "FINISHED"
-            || response?.quasi_status === "FINISHED",
-        closed,
-        title,
-        responseMessageId
+            .map((f) => f.content ?? "").join("")
     };
+}
+
+export function reduceSSE(sseText: string): CompletionOutcome {
+    const stream = new CompletionStream();
+    stream.push(sseText);
+    stream.flush();
+    return stream.outcome();
 }

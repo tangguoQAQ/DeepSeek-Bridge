@@ -20,7 +20,8 @@ export class SerialQueue {
         return { active: this.active, pending: this.waiters.length };
     }
 
-    async run<T>(task: () => Promise<T>): Promise<T> {
+    // 取一个执行位（含最小间隔节流）；返回释放函数（幂等）
+    async acquire(): Promise<() => void> {
         if(this.active + this.waiters.length >= 1 + this.maxPending) {
             throw new ApiError(429, "rate_limit_error",
                 `请求队列已满（排队上限 ${this.maxPending}），请稍后重试`);
@@ -40,15 +41,27 @@ export class SerialQueue {
         }
         this.lastStartAt = Date.now();
 
-        try {
-            return await task();
-        } finally {
+        let released = false;
+        return () => {
+            if(released) {
+                return;
+            }
+            released = true;
             const next = this.waiters.shift();
             if(next) {
                 next();
             } else {
                 this.active = 0;
             }
+        };
+    }
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+        const release = await this.acquire();
+        try {
+            return await task();
+        } finally {
+            release();
         }
     }
 }

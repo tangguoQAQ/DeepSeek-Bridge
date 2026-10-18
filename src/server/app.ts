@@ -1,6 +1,7 @@
 ﻿import { Hono } from "hono";
 import { ApiError } from "./errors";
-import { runChatCompletion, MODEL_PROFILES } from "./completions";
+import { runChatCompletion, runChatCompletionStream, MODEL_PROFILES } from "./completions";
+import { parseChatRequest } from "./openai-schema";
 import type { BridgeConfig } from "../config";
 import type { SerialQueue } from "../queue";
 import type { ChatBackend } from "../driver/types";
@@ -88,13 +89,20 @@ export function createApp(
         });
 
         try {
-            const payload = await runChatCompletion(body, queue, backend, config.promptCharBudget);
+            const req = parseChatRequest(body);
+            let response: Response;
+            if(req.stream) {
+                response = await runChatCompletionStream(req, queue, backend, config.promptCharBudget);
+            } else {
+                const payload = await runChatCompletion(req, queue, backend, config.promptCharBudget);
+                c.header("x-dsbridge-usage", "estimated");
+                response = c.json(payload);
+            }
             if(state.status === "WAIT_LOGIN") {
                 state.status = "READY";
                 console.log("[api] Login recovered, READY.");
             }
-            c.header("x-dsbridge-usage", "estimated");
-            return c.json(payload);
+            return response;
         } catch(err) {
             if(err instanceof ApiError && err.status === 401 && state.status === "READY") {
                 state.status = "WAIT_LOGIN";

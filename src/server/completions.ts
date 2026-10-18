@@ -1,8 +1,9 @@
-import { parseChatRequest } from "./openai-schema";
 import { buildPrompt } from "../protocol/prompt";
 import { ApiError } from "./errors";
+import { deltaChunk, finishChunk, usageChunk, SSE_DONE, SSE_PING, KEEPALIVE_INTERVAL_MS } from "./sse";
+import type { ChatRequest } from "./openai-schema";
 import type { CompletionOutcome } from "../protocol/patch-stream";
-import type { ChatBackend } from "../driver/types";
+import type { ChatBackend, ChatEvent } from "../driver/types";
 import type { SerialQueue } from "../queue";
 
 export interface ModelProfile {
@@ -51,42 +52,198 @@ export function resolveModel(name: string): ModelProfile {
     return { id: name, thinking: false, search: false };
 }
 
+// 非流式：消费驱动增量流，汇总成完整响应（M3 起非流式也走流式驱动，§5.6）
 export async function runChatCompletion(
-    body: unknown,
+    req: ChatRequest,
     queue: SerialQueue,
     backend: ChatBackend,
     promptCharBudget: number,
 ): Promise<ChatCompletionResponse> {
-    const req = parseChatRequest(body);
+    const { prompt, model } = prepare(req, promptCharBudget);
+
+    const collected = await queue.run(async () => {
+        let text = "";
+        let reasoning = "";
+        let outcome: CompletionOutcome | null = null;
+
+        for await (const event of backend.chat({
+            prompt,
+            thinking: model.thinking,
+            search: model.search
+        })) {
+            if(event.type === "text") {
+                text += event.text;
+            } else if(event.type === "reasoning") {
+                reasoning += event.text;
+            } else {
+                outcome = event.outcome;
+            }
+        }
+
+        if(outcome === null) {
+            throw new ApiError(502, "api_error", "Stream ended without completion event");
+        }
+        if(!outcome.finished) {
+            console.warn("[api] Stream closed without FINISHED status; returning partial content");
+        }
+        return { text, reasoning, outcome };
+    });
+
+    return buildCompletionResponse(collected.text, collected.reasoning, collected.outcome, model, prompt);
+}
+
+// 流式：驱动事件 → OpenAI SSE chunk（首个事件前的错误以普通 HTTP 错误返回，§6.6）
+export async function runChatCompletionStream(
+    req: ChatRequest,
+    queue: SerialQueue,
+    backend: ChatBackend,
+    promptCharBudget: number,
+): Promise<Response> {
+    const { prompt, model } = prepare(req, promptCharBudget);
+
+    const abort = new AbortController();
+    const release = await queue.acquire();
+    const iterator = backend.chat({
+        prompt,
+        thinking: model.thinking,
+        search: model.search
+    }, abort.signal);
+
+    let first: IteratorResult<ChatEvent>;
+    try {
+        first = await iterator.next();
+    } catch(err) {
+        release();
+        throw err;
+    }
+    if(first.done) {
+        release();
+        throw new ApiError(502, "api_error", "Stream ended before producing any event");
+    }
+
+    const id = `chatcmpl-ds-${crypto.randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const encoder = new TextEncoder();
+    const promptTokens = estimateTokens(prompt);
+
+    const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+            void (async () => {
+                let lastSendAt = Date.now();
+                let controllerClosed = false;
+
+                const send = (text: string) => {
+                    if(controllerClosed) {
+                        return;
+                    }
+                    lastSendAt = Date.now();
+                    try {
+                        controller.enqueue(encoder.encode(text));
+                    } catch {
+                        controllerClosed = true;
+                    }
+                };
+
+                const keepalive = setInterval(() => {
+                    if(Date.now() - lastSendAt >= KEEPALIVE_INTERVAL_MS) {
+                        send(SSE_PING);
+                    }
+                }, KEEPALIVE_INTERVAL_MS);
+
+                let roleSent = false;
+                const ensureRole = () => {
+                    if(!roleSent) {
+                        roleSent = true;
+                        send(deltaChunk(id, created, model.id, { role: "assistant" }));
+                    }
+                };
+
+                let outcome: CompletionOutcome | null = null;
+                let current: IteratorResult<ChatEvent> = first;
+
+                try {
+                    while(!current.done) {
+                        const event = current.value;
+                        if(event.type === "text") {
+                            ensureRole();
+                            send(deltaChunk(id, created, model.id, { content: event.text }));
+                        } else if(event.type === "reasoning") {
+                            ensureRole();
+                            send(deltaChunk(id, created, model.id, { reasoning_content: event.text }));
+                        } else {
+                            outcome = event.outcome;
+                            break;
+                        }
+                        current = await iterator.next();
+                    }
+
+                    ensureRole();
+                    if(outcome !== null && !outcome.finished) {
+                        console.warn("[sse] Stream closed without FINISHED status; finishing anyway");
+                    }
+                    send(finishChunk(id, created, model.id));
+                    if(req.includeUsage) {
+                        const completionTokens = outcome?.completionTokens ?? 0;
+                        send(usageChunk(id, created, model.id, {
+                            prompt_tokens: promptTokens,
+                            completion_tokens: completionTokens,
+                            total_tokens: promptTokens + completionTokens
+                        }));
+                    }
+                    send(SSE_DONE);
+                } catch(err) {
+                    // 首字节后出错：直接断开流（§6.6）
+                    console.warn(`[sse] Stream aborted: ${(err as Error).message}`);
+                    if(!controllerClosed) {
+                        controllerClosed = true;
+                        try { controller.error(err); } catch {}
+                    }
+                } finally {
+                    clearInterval(keepalive);
+                    try { await iterator.return(undefined); } catch {}
+                    release();
+                    if(!controllerClosed) {
+                        try { controller.close(); } catch {}
+                    }
+                }
+            })();
+        },
+        cancel() {
+            abort.abort();
+        }
+    });
+
+    return new Response(stream, {
+        headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            "x-dsbridge-usage": "estimated"
+        }
+    });
+}
+
+function prepare(req: ChatRequest, promptCharBudget: number): { prompt: string; model: ModelProfile } {
     const model = resolveModel(req.model);
     const { prompt, truncated } = buildPrompt(req.messages, promptCharBudget);
     if(truncated) {
         console.warn(`[api] Prompt exceeded budget (${promptCharBudget} chars), truncated`);
     }
-
-    const outcome = await queue.run(() => backend.chat({
-        prompt,
-        thinking: model.thinking,
-        search: model.search,
-    }));
-    if(!outcome.finished) {
-        throw new ApiError(504, "timeout_error", "网页端生成未正常结束（超时或被中断）");
-    }
-
-    return buildCompletionResponse(outcome, model, prompt);
+    return { prompt, model };
 }
 
 function buildCompletionResponse(
+    text: string,
+    reasoning: string,
     outcome: CompletionOutcome,
     model: ModelProfile,
     prompt: string,
 ): ChatCompletionResponse {
     const message: ChatCompletionResponse["choices"][0]["message"] = {
         role: "assistant",
-        content: outcome.text,
+        content: text
     };
-    if(model.thinking && outcome.reasoning.length > 0) {
-        message.reasoning_content = outcome.reasoning;
+    if(model.thinking && reasoning.length > 0) {
+        message.reasoning_content = reasoning;
     }
 
     const promptTokens = estimateTokens(prompt);
@@ -99,13 +256,13 @@ function buildCompletionResponse(
             index: 0,
             message,
             finish_reason: "stop",
-            logprobs: null,
+            logprobs: null
         }],
         usage: {
             prompt_tokens: promptTokens,
             completion_tokens: outcome.completionTokens,
-            total_tokens: promptTokens + outcome.completionTokens,
-        },
+            total_tokens: promptTokens + outcome.completionTokens
+        }
     };
 }
 
