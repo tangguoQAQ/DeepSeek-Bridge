@@ -1,5 +1,6 @@
 ﻿import { Hono } from "hono";
 import type { BridgeConfig } from "../config";
+ import { ApiError } from "./errors";
 
 export type BridgeStatus =
     | "BOOT" | "LAUNCHING"
@@ -78,6 +79,9 @@ export function createApp(config: BridgeConfig, state: BridgeState) {
     }, 404));
 
     app.onError((err, c) => {
+        if(err instanceof ApiError) {
+            return c.json({ error: { message: err.message, type: err.type } }, err.status);
+        }
         state.lastError = err.message;
         console.error("[error]", err);
         return c.json({
