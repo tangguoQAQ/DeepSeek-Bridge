@@ -5,17 +5,12 @@ import { reduceSSE } from "../protocol/patch-stream";
 import type { CompletionOutcome } from "../protocol/patch-stream";
 import { solvePow, buildPowHeader } from "../pow/solve";
 import type { PowChallenge } from "../pow/solve";
-
-export interface ChatOptions {
-    prompt: string;
-    thinking?: boolean;
-    search?: boolean;
-}
+import type { ChatBackend, ChatOptions } from "./types";
 
 const COMPLETION_TIMEOUT_MS = 120000;
 
 // M2 非流式版：整条 SSE 收完再 reduceSSE；M3 改成增量事件（§5.6 ChatDriver）
-export class WebApiDriver {
+export class WebApiDriver implements ChatBackend {
     constructor(private readonly page: Page) {}
 
     async chat(opts: ChatOptions): Promise<CompletionOutcome> {

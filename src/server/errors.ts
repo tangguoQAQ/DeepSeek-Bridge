@@ -1,4 +1,4 @@
-﻿export type ApiStatus = 400 | 401 | 403 | 404 | 429 | 500 | 502 | 504;
+﻿export type ApiStatus = 400 | 401 | 403 | 404 | 429 | 500 | 502 | 503 | 504;
 
 export type OpenAIErrorType =
     | "invalid_request_error"

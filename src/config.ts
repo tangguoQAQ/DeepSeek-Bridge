@@ -10,6 +10,8 @@ export interface BridgeConfig {
     profileDir: string;
     headless: boolean;
     browserChannel: BrowserChannel;
+    minRequestIntervalMs: number;
+    promptCharBudget: number;
 }
 
 function findArg(argv: string[], name: string): string | null {
@@ -36,5 +38,7 @@ export function parseConfig(argv: string[]): BridgeConfig {
         profileDir: findArg(argv, "profile") ?? "./.deepseek-profile",
         headless: argv.includes("--headless"),
         browserChannel: browserChannel as BrowserChannel,
+        minRequestIntervalMs: 1000,
+        promptCharBudget: 24000,
     };
 }

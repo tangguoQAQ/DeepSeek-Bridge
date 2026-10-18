@@ -1,6 +1,9 @@
 ﻿import { Hono } from "hono";
+import { ApiError } from "./errors";
+import { runChatCompletion, MODEL_PROFILES } from "./completions";
 import type { BridgeConfig } from "../config";
- import { ApiError } from "./errors";
+import type { SerialQueue } from "../queue";
+import type { ChatBackend } from "../driver/types";
 
 export type BridgeStatus =
     | "BOOT" | "LAUNCHING"
@@ -13,21 +16,21 @@ export interface BridgeState {
     lastError: string | null;
 }
 
-export const MODEL_IDS = [
-    "deepseek-chat",
-    "deepseek-reasoner",
-    "deepseek-search",
-    "deepseek-reasoner-search",
-] as const;
+const MODEL_IDS = Object.keys(MODEL_PROFILES);
 
-export function createApp(config: BridgeConfig, state: BridgeState) {
+export function createApp(
+    config: BridgeConfig,
+    state: BridgeState,
+    queue: SerialQueue,
+    getBackend: () => ChatBackend | null,
+) {
     const app = new Hono();
-    
+
     // Security: Host header verification, against DNS rebinding
     app.use("*", async (c, next) => {
         const host = (c.req.header("host") ?? "").toLowerCase();
         const allowed = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
-        if (!allowed.includes(host)) {
+        if(!allowed.includes(host)) {
             return c.json({
                 error: { message: "forbidden host", type: "invalid_request_error" }
             }, 403);
@@ -35,7 +38,7 @@ export function createApp(config: BridgeConfig, state: BridgeState) {
 
         return next();
     });
-    
+
     // Security: Optional token
     app.use("/v1/*", async (c, next) => {
         if(config.token === null) {
@@ -59,7 +62,7 @@ export function createApp(config: BridgeConfig, state: BridgeState) {
     app.get("/healthz", (c) => c.json({
         status: state.status,
         uptime: Math.round((Date.now() - state.startedAt) / 1000),
-        queue: { pending: 0, active: 0 },
+        queue: queue.snapshot,
         lastError: state.lastError
     }));
 
@@ -73,6 +76,33 @@ export function createApp(config: BridgeConfig, state: BridgeState) {
             owned_by: "deepseek-web"
         }))
     }));
+
+    app.post("/v1/chat/completions", async (c) => {
+        const backend = getBackend();
+        if(backend === null) {
+            throw new ApiError(503, "api_error", "Bridge 未就绪（浏览器启动/等待登录中），请稍后重试");
+        }
+
+        const body = await c.req.json().catch(() => {
+            throw new ApiError(400, "invalid_request_error", "请求体不是合法 JSON");
+        });
+
+        try {
+            const payload = await runChatCompletion(body, queue, backend, config.promptCharBudget);
+            if(state.status === "WAIT_LOGIN") {
+                state.status = "READY";
+                console.log("[api] Login recovered, READY.");
+            }
+            c.header("x-dsbridge-usage", "estimated");
+            return c.json(payload);
+        } catch(err) {
+            if(err instanceof ApiError && err.status === 401 && state.status === "READY") {
+                state.status = "WAIT_LOGIN";
+                console.warn("[api] Login lost, please sign in again in the browser window.");
+            }
+            throw err;
+        }
+    });
 
     app.notFound((c) => c.json({
         error: { message: "not found", type: "invalid_request_error" }

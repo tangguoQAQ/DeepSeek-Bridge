@@ -1,10 +1,13 @@
 import { parseConfig } from "./config";
 import { createApp } from "./server/app";
+import { SerialQueue } from "./queue";
+import { WebApiDriver } from "./driver/web-api";
+import { launchChatBrowser } from "./browser/launcher";
+import { checkLogin, waitForLogin } from "./browser/auth";
 import type { BridgeConfig } from "./config";
 import type { BridgeState } from "./server/app";
-import { launchChatBrowser } from "./browser/launcher";
+import type { ChatBackend } from "./driver/types";
 import type { ChatBrowser } from "./browser/launcher";
-import { checkLogin, waitForLogin } from "./browser/auth";
 
 const DEEPSEEK_BRIDGE_VERSION = "0.0.1";
 
@@ -22,7 +25,10 @@ const state: BridgeState = {
     lastError: null,
 };
 
-const app = createApp(config, state);
+const queue = new SerialQueue(4, config.minRequestIntervalMs);
+let backend: ChatBackend | null = null;
+
+const app = createApp(config, state, queue, () => backend);
 const server = Bun.serve({
     hostname: config.host,
     port: config.port,
@@ -39,6 +45,7 @@ Server will listen on http://${server.hostname}:${server.port}
 Endpoints:
 - GET /healthz    \tStatus and health of the server
 - GET /v1/models  \tList of available models
+- POST /v1/chat/completions  \tOpenAI compatible chat completions
 
 Only for personal research. Please obey DeepSeek's terms of service. 
 `);
@@ -102,3 +109,7 @@ try {
     await browser.context.close().catch(() => {});
     process.exit(1);
 }
+
+// ===== Driver =====
+backend = new WebApiDriver(browser.page);
+console.log("[boot] Driver attached, accepting requests.");
