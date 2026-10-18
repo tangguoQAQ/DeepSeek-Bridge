@@ -1,7 +1,15 @@
-﻿export interface BridgeConfig {
+﻿export type BrowserChannel = "auto" | "chrome" | "msedge" | "chromium";
+
+const BROWSER_CHANNELS: readonly string[] =
+    ["auto", "chrome", "msedge", "chromium"];
+
+export interface BridgeConfig {
     port: number;
     host: string;
-    token: string | null
+    token: string | null;
+    profileDir: string;
+    headless: boolean;
+    browserChannel: BrowserChannel;
 }
 
 function findArg(argv: string[], name: string): string | null {
@@ -16,9 +24,17 @@ export function parseConfig(argv: string[]): BridgeConfig {
         throw new Error(`Invalid --port: ${portRaw}`);
     }
 
+    const browserChannel = findArg(argv, "browser-channel") ?? "auto";
+    if(!BROWSER_CHANNELS.includes(browserChannel)) {
+        throw new Error(`Invalid --browser-channel: ${browserChannel}（auto/chrome/msedge/chromium）`);
+    }
+
     return {
         port,
         host: findArg(argv, "host") ?? "127.0.0.1",
         token: findArg(argv, "token"),
+        profileDir: findArg(argv, "profile") ?? "./.deepseek-profile",
+        headless: argv.includes("--headless"),
+        browserChannel: browserChannel as BrowserChannel,
     };
 }
