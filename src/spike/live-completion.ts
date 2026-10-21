@@ -6,7 +6,7 @@ import { chromium } from "patchright";
 // 用法: bun run src/spike/live-completion.ts [chat|thinking|search]
 const mode = process.argv[2] ?? "chat";
 if (!["chat", "thinking", "search"].includes(mode)) {
-    throw new Error("mode 只支持 chat / thinking / search");
+    throw new Error("mode must be chat / thinking / search");
 }
 
 // ===== 1. 进程内 wasm 求解器（与 pow-solve.ts 相同） =====
@@ -67,7 +67,7 @@ try {
         });
         if (!token) await new Promise((r) => setTimeout(r, 3000));
     }
-    if (!token) throw new Error("未检测到登录态");
+    if (!token) throw new Error("Login session not detected");
     console.log("✅ 登录态 OK，token:", token.slice(0, 8) + "…");
 
     // ===== 3. 建会话 + 取挑战（页面内 fetch，手动带 authorization） =====
@@ -92,7 +92,7 @@ try {
     }, token);
 
     if (!boot.sessionId || !boot.challenge) {
-        throw new Error("建会话/取挑战失败: " + JSON.stringify(boot));
+        throw new Error("Failed to create session / fetch challenge: " + JSON.stringify(boot));
     }
     const ch = boot.challenge as {
         algorithm: string; challenge: string; salt: string; signature: string;
@@ -106,7 +106,7 @@ try {
     const prefix = `${ch.salt}_${ch.expire_at}_`;
     const t0 = performance.now();
     const answer = solve(ch.challenge, prefix, ch.difficulty);
-    if (answer === null) throw new Error("PoW 求解失败");
+    if (answer === null) throw new Error("PoW solve failed");
     console.log(`✅ 解出 answer=${answer}（${(performance.now() - t0).toFixed(1)}ms）`);
 
     const powHeader = Buffer.from(JSON.stringify({

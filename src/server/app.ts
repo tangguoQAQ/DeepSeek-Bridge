@@ -81,11 +81,11 @@ export function createApp(
     app.post("/v1/chat/completions", async (c) => {
         const backend = getBackend();
         if(backend === null) {
-            throw new ApiError(503, "api_error", "Bridge 未就绪（浏览器启动/等待登录中），请稍后重试");
+            throw new ApiError(503, "api_error", "Bridge not ready (browser launching or waiting for login), please retry later");
         }
 
         const body = await c.req.json().catch(() => {
-            throw new ApiError(400, "invalid_request_error", "请求体不是合法 JSON");
+            throw new ApiError(400, "invalid_request_error", "Request body is not valid JSON");
         });
 
         try {

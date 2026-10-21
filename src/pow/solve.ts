@@ -24,7 +24,7 @@ export async function solvePow(challenge: PowChallenge): Promise<PowSolution> {
     const ms = performance.now() - t0;
 
     if(answer === null) {
-        throw new Error("PoW 求解失败（T1 wasm 未找到解）");
+        throw new Error("PoW solve failed (T1 wasm found no solution)");
     }
 
     console.log(`[pow] difficulty=${challenge.difficulty} answer=${answer} ${ms.toFixed(1)}ms`);

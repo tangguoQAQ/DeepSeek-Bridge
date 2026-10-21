@@ -131,7 +131,7 @@ export class WebApiDriver implements ChatBackend {
         const token = await getUserToken(this.page);
         if(token === null) {
             throw new ApiError(401, "authentication_error",
-                "未登录：请在浏览器窗口登录 DeepSeek 后重试");
+                "Not signed in. Please sign in to DeepSeek in the browser window and retry.");
         }
 
         const boot: {
@@ -171,7 +171,7 @@ export class WebApiDriver implements ChatBackend {
 
         if(boot.sessionId === null || boot.challenge === null) {
             throw new ApiError(502, "api_error",
-                `建会话/取挑战失败（session HTTP ${boot.sessionStatus} / challenge HTTP ${boot.challengeStatus}）`);
+                `Failed to create session / fetch PoW challenge (session HTTP ${boot.sessionStatus} / challenge HTTP ${boot.challengeStatus})`);
         }
 
         const solved = await solvePow(boot.challenge);
@@ -412,20 +412,20 @@ export class WebApiDriver implements ChatBackend {
             if(httpStatus !== 200) {
                 if(httpStatus === 401) {
                     throw new ApiError(401, "authentication_error",
-                        "登录已失效：请在浏览器窗口重新登录");
+                        "Session expired. Please sign in again in the browser window.");
                 }
                 if(httpStatus === 429) {
                     throw new ApiError(429, "rate_limit_error",
-                        "DeepSeek 网页端返回 429（可能触发限流）");
+                        "DeepSeek web returned HTTP 429 (rate limited)");
                 }
                 if(httpStatus === 0 && pageError !== null) {
-                    throw new ApiError(502, "api_error", `completion 请求失败：${pageError}`);
+                    throw new ApiError(502, "api_error", `Completion request failed: ${pageError}`);
                 }
                 throw new ApiError(502, "api_error",
-                    `completion 返回 HTTP ${httpStatus}（content-type: ${contentType}）`);
+                    `Completion returned HTTP ${httpStatus} (content-type: ${contentType})`);
             }
             if(pageError !== null) {
-                throw new ApiError(502, "api_error", `读取流失败：${pageError}`);
+                throw new ApiError(502, "api_error", `Stream read failed: ${pageError}`);
             }
 
             yield { type: "done", outcome: stream.outcome() };
@@ -457,11 +457,11 @@ export class WebApiDriver implements ChatBackend {
     private timeoutReason(startedAt: number, firstDeltaAt: number | null): string {
         const now = Date.now();
         if(now - startedAt >= TOTAL_TIMEOUT_MS) {
-            return `总时长超时（${TOTAL_TIMEOUT_MS / 60000} 分钟）`;
+            return `Total timeout (${TOTAL_TIMEOUT_MS / 60000} minutes)`;
         }
         if(firstDeltaAt === null && now - startedAt >= FIRST_TOKEN_TIMEOUT_MS) {
-            return `首 token 超时（${FIRST_TOKEN_TIMEOUT_MS / 1000} 秒无增量）`;
+            return `First-token timeout (no delta within ${FIRST_TOKEN_TIMEOUT_MS / 1000}s)`;
         }
-        return `增量间隔超时（${IDLE_TIMEOUT_MS / 1000} 秒无数据）`;
+        return `Idle timeout (no data within ${IDLE_TIMEOUT_MS / 1000}s)`;
     }
 }

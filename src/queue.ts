@@ -24,7 +24,7 @@ export class SerialQueue {
     async acquire(): Promise<() => void> {
         if(this.active + this.waiters.length >= 1 + this.maxPending) {
             throw new ApiError(429, "rate_limit_error",
-                `请求队列已满（排队上限 ${this.maxPending}），请稍后重试`);
+                `Request queue is full (max ${this.maxPending} pending), please retry later`);
         }
 
         if(this.active === 0) {
