@@ -1,9 +1,20 @@
 ﻿import { test, expect } from "bun:test";
-import { buildPrompt } from "../src/protocol/prompt";
+import { buildPrompt, renderIncremental, renderMessage } from "../src/protocol/prompt";
+import type { PromptMessage } from "../src/protocol/prompt";
+import type { ToolDefinition } from "../src/protocol/tool-calls";
 
 const system = (content: string) => ({ role: "system" as const, content });
 const user = (content: string) => ({ role: "user" as const, content });
 const assistant = (content: string) => ({ role: "assistant" as const, content });
+
+const weatherTool: ToolDefinition = {
+    type: "function",
+    function: {
+        name: "get_weather",
+        description: "查天气",
+        parameters: { type: "object", properties: { city: { type: "string" } } }
+    }
+};
 
 test("基本拼装：system 置顶、末尾是最后一条 user", () => {
     const { prompt, truncated } = buildPrompt([
@@ -50,4 +61,54 @@ test("超预算从中间裁剪：保首轮与末尾", () => {
 test("单条消息超预算：截断并标注", () => {
     const { prompt } = buildPrompt([user("啊".repeat(8000))], 3000);
     expect(prompt).toContain("……（截断部分）……");
+});
+
+test("带 tools 时在 header 注入协议；不带则不注入", () => {
+    const withTools = buildPrompt([user("查天气")], 8000, {
+        tools: [weatherTool],
+        toolChoice: "auto",
+        parallelToolCalls: true
+    });
+    expect(withTools.prompt).toContain("## 工具调用");
+    expect(withTools.prompt).toContain("get_weather");
+    expect(withTools.prompt.indexOf("## 工具调用")).toBeLessThan(
+        withTools.prompt.indexOf("[User] 查天气"));
+
+    const without = buildPrompt([user("查天气")], 8000);
+    expect(without.prompt).not.toContain("## 工具调用");
+});
+
+test("assistant tool_calls 与 tool 结果按历史格式渲染", () => {
+    const history: PromptMessage[] = [
+        user("查天气"),
+        {
+            role: "assistant",
+            content: "",
+            toolCalls: [{
+                id: "call_1",
+                name: "get_weather",
+                arguments: "{\"city\":\"北京\"}"
+            }]
+        },
+        { role: "tool", content: "晴，25°C", toolCallId: "call_1" },
+        user("总结一下")
+    ];
+    const { prompt } = buildPrompt(history);
+    expect(prompt).toContain("[Assistant] \n<tool_calls>");
+    expect(prompt).toContain("\"name\":\"get_weather\"");
+    expect(prompt).toContain("\"city\":\"北京\"");
+    expect(prompt).toContain("[Tool result id=call_1] 晴，25°C");
+    expect(prompt.endsWith("[User] 总结一下\n\n")).toBe(true);
+});
+
+test("renderIncremental：只渲染新增消息", () => {
+    const message: PromptMessage = {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+    };
+    expect(renderIncremental([user("继续")])).toBe("[User] 继续");
+    expect(renderIncremental([{ role: "tool", content: "晴", toolCallId: "call_1" }]))
+        .toBe("[Tool result id=call_1] 晴");
+    expect(renderMessage(message)).toContain("</tool_calls>");
 });

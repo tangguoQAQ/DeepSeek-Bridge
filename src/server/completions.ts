@@ -1,4 +1,6 @@
 import { buildPrompt } from "../protocol/prompt";
+import { hashTools, toolChoiceDirective } from "../protocol/tool-calls";
+import type { ToolCall } from "../protocol/tool-calls";
 import { ApiError } from "./errors";
 import { deltaChunk, finishChunk, usageChunk, SSE_DONE, SSE_PING, KEEPALIVE_INTERVAL_MS } from "./sse";
 import type { ChatRequest } from "./openai-schema";
@@ -21,10 +23,18 @@ export interface ChatCompletionResponse {
         index: number;
         message: {
             role: "assistant";
-            content: string;
+            content: string | null;
             reasoning_content?: string;
+            tool_calls?: Array<{
+                id: string;
+                type: "function";
+                function: {
+                    name: string;
+                    arguments: string;
+                };
+            }>;
         };
-        finish_reason: "stop";
+        finish_reason: "stop" | "tool_calls";
         logprobs: null;
     }>;
     usage: {
@@ -59,18 +69,22 @@ export async function runChatCompletion(
     backend: ChatBackend,
     promptCharBudget: number,
 ): Promise<ChatCompletionResponse> {
-    const { prompt, model } = prepare(req, promptCharBudget);
+    const { prompt, model, toolsHash, toolNames, toolDirective } = prepare(req, promptCharBudget);
 
     const collected = await queue.run(async () => {
         let text = "";
         let reasoning = "";
+        let toolCalls: ToolCall[] = [];
         let outcome: CompletionOutcome | null = null;
 
         for await (const event of backend.chat({
             prompt,
             messages: req.messages,
             thinking: model.thinking,
-            search: model.search
+            search: model.search,
+            toolsHash,
+            toolNames,
+            toolDirective
         })) {
             if(event.type === "text") {
                 text += event.text;
@@ -78,6 +92,7 @@ export async function runChatCompletion(
                 reasoning += event.text;
             } else {
                 outcome = event.outcome;
+                toolCalls = event.toolCalls ?? [];
             }
         }
 
@@ -87,10 +102,17 @@ export async function runChatCompletion(
         if(!outcome.finished) {
             console.warn("[api] Stream closed without FINISHED status; returning partial content");
         }
-        return { text, reasoning, outcome };
+        return { text, reasoning, outcome, toolCalls };
     });
 
-    return buildCompletionResponse(collected.text, collected.reasoning, collected.outcome, model, prompt);
+    return buildCompletionResponse(
+        collected.text,
+        collected.reasoning,
+        collected.toolCalls,
+        collected.outcome,
+        model,
+        prompt
+    );
 }
 
 // 流式：驱动事件 → OpenAI SSE chunk（首个事件前的错误以普通 HTTP 错误返回，§6.6）
@@ -100,7 +122,7 @@ export async function runChatCompletionStream(
     backend: ChatBackend,
     promptCharBudget: number,
 ): Promise<Response> {
-    const { prompt, model } = prepare(req, promptCharBudget);
+    const { prompt, model, toolsHash, toolNames, toolDirective } = prepare(req, promptCharBudget);
 
     const abort = new AbortController();
     const release = await queue.acquire();
@@ -108,7 +130,10 @@ export async function runChatCompletionStream(
         prompt,
         messages: req.messages,
         thinking: model.thinking,
-        search: model.search
+        search: model.search,
+        toolsHash,
+        toolNames,
+        toolDirective
     }, abort.signal);
 
     let first: IteratorResult<ChatEvent>;
@@ -161,6 +186,7 @@ export async function runChatCompletionStream(
                 };
 
                 let outcome: CompletionOutcome | null = null;
+                let toolCalls: ToolCall[] = [];
                 let current: IteratorResult<ChatEvent> = first;
 
                 try {
@@ -174,6 +200,7 @@ export async function runChatCompletionStream(
                             send(deltaChunk(id, created, model.id, { reasoning_content: event.text }));
                         } else {
                             outcome = event.outcome;
+                            toolCalls = event.toolCalls ?? [];
                             break;
                         }
                         current = await iterator.next();
@@ -183,7 +210,22 @@ export async function runChatCompletionStream(
                     if(outcome !== null && !outcome.finished) {
                         console.warn("[sse] Stream closed without FINISHED status; finishing anyway");
                     }
-                    send(finishChunk(id, created, model.id));
+                    let finishReason: "stop" | "tool_calls" = "stop";
+                    if(toolCalls.length > 0) {
+                        finishReason = "tool_calls";
+                        send(deltaChunk(id, created, model.id, {
+                            tool_calls: toolCalls.map((call, index) => ({
+                                index,
+                                id: call.id,
+                                type: "function",
+                                function: {
+                                    name: call.name,
+                                    arguments: call.arguments
+                                }
+                            }))
+                        }));
+                    }
+                    send(finishChunk(id, created, model.id, finishReason));
                     if(req.includeUsage) {
                         const completionTokens = outcome?.completionTokens ?? 0;
                         send(usageChunk(id, created, model.id, {
@@ -224,18 +266,51 @@ export async function runChatCompletionStream(
     });
 }
 
-function prepare(req: ChatRequest, promptCharBudget: number): { prompt: string; model: ModelProfile } {
+function prepare(
+    req: ChatRequest,
+    promptCharBudget: number
+): {
+    prompt: string;
+    model: ModelProfile;
+    toolsHash: string;
+    toolNames: string[] | undefined;
+    toolDirective: string;
+} {
     const model = resolveModel(req.model);
-    const { prompt, truncated } = buildPrompt(req.messages, promptCharBudget);
+    // tool_choice=none：本轮不把工具暴露给网页模型，避免“有工具但不许用”导致空回复。
+    // toolsHash 置空，与启用工具的会话隔离；后续切回 auto 会自然新建会话。
+    const toolsEnabled = req.tools.length > 0 && req.toolChoice !== "none";
+    const tooling = toolsEnabled
+        ? {
+            tools: req.tools,
+            toolChoice: req.toolChoice,
+            parallelToolCalls: req.parallelToolCalls
+        }
+        : undefined;
+    const { prompt, truncated } = buildPrompt(req.messages, promptCharBudget, tooling);
     if(truncated) {
         console.warn(`[api] Prompt exceeded budget (${promptCharBudget} chars), truncated`);
     }
-    return { prompt, model };
+
+    return {
+        prompt,
+        model,
+        toolsHash: toolsEnabled ? hashTools(req.tools) : "",
+        toolNames: req.tools.length === 0
+            ? undefined
+            : req.toolChoice === "none"
+                ? []
+                : req.tools.map((tool) => tool.function.name),
+        toolDirective: toolsEnabled
+            ? toolChoiceDirective(req.toolChoice, req.parallelToolCalls)
+            : ""
+    };
 }
 
 function buildCompletionResponse(
     text: string,
     reasoning: string,
+    toolCalls: ToolCall[],
     outcome: CompletionOutcome,
     model: ModelProfile,
     prompt: string,
@@ -244,6 +319,17 @@ function buildCompletionResponse(
         role: "assistant",
         content: text
     };
+    if(toolCalls.length > 0) {
+        message.content = text.length > 0 ? text : null;
+        message.tool_calls = toolCalls.map((call) => ({
+            id: call.id,
+            type: "function",
+            function: {
+                name: call.name,
+                arguments: call.arguments
+            }
+        }));
+    }
     if(model.thinking && reasoning.length > 0) {
         message.reasoning_content = reasoning;
     }
@@ -257,7 +343,7 @@ function buildCompletionResponse(
         choices: [{
             index: 0,
             message,
-            finish_reason: "stop",
+            finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
             logprobs: null
         }],
         usage: {

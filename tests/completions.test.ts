@@ -126,6 +126,135 @@ test("未带 FINISHED 收尾：宽容返回已收内容", async () => {
     expect(payload.choices[0]!.message.content).toBe("你好！");
 });
 
+test("非流式：工具调用 → tool_calls + finish_reason=tool_calls", async () => {
+    const record: ChatOptions[] = [];
+    const tool = {
+        type: "function",
+        function: {
+            name: "get_weather",
+            description: "查天气",
+            parameters: { type: "object", properties: { city: { type: "string" } } }
+        }
+    };
+    const payload = await runChatCompletion(
+        parse("deepseek-chat", { tools: [tool] }),
+        new SerialQueue(4, 0),
+        fakeBackend({
+            record,
+            events: [
+                { type: "text", text: "我查一下。" },
+                {
+                    type: "done",
+                    outcome: { ...OUTCOME, text: "我查一下。" },
+                    content: "我查一下。",
+                    toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{\"city\":\"北京\"}" }]
+                },
+            ],
+        }),
+        24000,
+    );
+
+    expect(payload.choices[0]!.message.content).toBe("我查一下。");
+    expect(payload.choices[0]!.message.tool_calls).toEqual([{
+        id: "call_1",
+        type: "function",
+        function: { name: "get_weather", arguments: "{\"city\":\"北京\"}" }
+    }]);
+    expect(payload.choices[0]!.finish_reason).toBe("tool_calls");
+
+    const opts = record[0]!;
+    expect(opts.toolNames).toEqual(["get_weather"]);
+    expect(opts.toolsHash).toHaveLength(64);
+    expect(opts.prompt).toContain("## 工具调用");
+});
+
+test("非流式：只有工具调用时 content 为 null", async () => {
+    const payload = await runChatCompletion(
+        parse("deepseek-chat", {
+            tools: [{ type: "function", function: { name: "get_weather" } }]
+        }),
+        new SerialQueue(4, 0),
+        fakeBackend({
+            events: [{
+                type: "done",
+                outcome: { ...OUTCOME, text: "" },
+                content: "",
+                toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+            }]
+        }),
+        24000,
+    );
+
+    expect(payload.choices[0]!.message.content).toBeNull();
+    expect(payload.choices[0]!.message.tool_calls).toHaveLength(1);
+});
+
+test("tool_choice=none：不注入工具协议、不启用工具会话", async () => {
+    const record: ChatOptions[] = [];
+    await runChatCompletion(
+        parse("deepseek-chat", {
+            tools: [{ type: "function", function: { name: "get_weather" } }],
+            tool_choice: "none"
+        }),
+        new SerialQueue(4, 0),
+        fakeBackend({ record }),
+        24000,
+    );
+
+    expect(record[0]!.toolNames).toEqual([]);
+    expect(record[0]!.toolsHash).toBe("");
+    expect(record[0]!.prompt).not.toContain("## 工具调用");
+    expect(record[0]!.prompt).not.toContain("禁止调用任何工具");
+});
+
+test("无 tools：不注入协议、不启用扫描器", async () => {
+    const record: ChatOptions[] = [];
+    await runChatCompletion(
+        parse(),
+        new SerialQueue(4, 0),
+        fakeBackend({ record }),
+        24000,
+    );
+
+    expect(record[0]!.toolNames).toBeUndefined();
+    expect(record[0]!.toolsHash).toBe("");
+    expect(record[0]!.prompt).not.toContain("## 工具调用");
+});
+
+test("流式：工具调用以 tool_calls delta 在 finish 前输出", async () => {
+    const res = await runChatCompletionStream(
+        parse("deepseek-chat", {
+            stream: true,
+            tools: [{ type: "function", function: { name: "get_weather" } }]
+        }),
+        new SerialQueue(4, 0),
+        fakeBackend({
+            events: [
+                { type: "text", text: "我查一下。" },
+                {
+                    type: "done",
+                    outcome: { ...OUTCOME, text: "我查一下。" },
+                    content: "我查一下。",
+                    toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{\"city\":\"北京\"}" }]
+                },
+            ],
+        }),
+        24000,
+    );
+
+    const text = await res.text();
+    const content = text.indexOf('"content":"我查一下。"');
+    const calls = text.indexOf('"tool_calls"');
+    const fin = text.indexOf('"finish_reason":"tool_calls"');
+    const done = text.indexOf("data: [DONE]");
+    expect(content).toBeGreaterThanOrEqual(0);
+    expect(calls).toBeGreaterThan(content);
+    expect(fin).toBeGreaterThan(calls);
+    expect(done).toBeGreaterThan(fin);
+    expect(text).toContain('"name":"get_weather"');
+    expect(text).toContain('"arguments":"{\\"city\\":\\"北京\\"}"');
+});
+
 test("流式：chunk 顺序 role → reasoning → content → finish → [DONE]", async () => {
     const res = await runChatCompletionStream(
         parse("deepseek-reasoner", { stream: true }),

@@ -33,4 +33,8 @@ bun check
 - `--max-sessions <n>`：最多保留桥创建的会话数，默认 `16`，超出按最近使用淘汰；`0` 表示不限制
 - `--no-session-reuse`：关闭复用（每轮都新建会话）
 
+## 工具调用
+
+支持 OpenAI 的 `tools`、`tool_choice`、`parallel_tool_calls` 与 `role:"tool"` 消息，客户端可直接开启 Tool Calling。工具调用由网页模型按桥注入的协议输出，再由桥转换为标准 `tool_calls`；工具定义变化会自动新建网页会话。配置与限制见 **[docs/clients.md](docs/clients.md#3-工具调用)**。
+
 This project was created using `bun init` in bun v1.4.3. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.

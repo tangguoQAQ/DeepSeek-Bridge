@@ -47,23 +47,23 @@ bun start
       "models": {
         "deepseek-chat": {
           "name": "DeepSeek Chat (Bridge)",
-          "capabilities": { "tools": false, "input": ["text"], "output": ["text"] },
+          "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
           "limit": { "context": 128000, "output": 16000 }
         },
         "deepseek-reasoner": {
           "name": "DeepSeek Reasoner (Bridge)",
-          "capabilities": { "tools": false, "input": ["text"], "output": ["text"] },
+          "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
           "compatibility": { "reasoningField": "reasoning_content" },
           "limit": { "context": 128000, "output": 16000 }
         },
         "deepseek-search": {
           "name": "DeepSeek Search (Bridge)",
-          "capabilities": { "tools": false, "input": ["text"], "output": ["text"] },
+          "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
           "limit": { "context": 128000, "output": 16000 }
         },
         "deepseek-reasoner-search": {
           "name": "DeepSeek Reasoner Search (Bridge)",
-          "capabilities": { "tools": false, "input": ["text"], "output": ["text"] },
+          "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
           "compatibility": { "reasoningField": "reasoning_content" },
           "limit": { "context": 128000, "output": 16000 }
         }
@@ -78,6 +78,7 @@ bun start
 - `apiKey` 填 `"dummy"` 即可；如果启动桥时用了 `--token`，改成指定的 token。
 - `compatibility.reasoningField` 让 reasoner 的 `reasoning_content` 正常显示。
 - `limit` 是保守估算值，可按需调大/调小。
+- 已支持工具调用，`capabilities.tools` 设为 `true`。
 
 ---
 
@@ -101,7 +102,7 @@ bun start
         "id": "deepseek-chat",
         "name": "DeepSeek Chat (Bridge)",
         "url": "http://127.0.0.1:7638/v1/chat/completions",
-        "toolCalling": false,
+        "toolCalling": true,
         "vision": false,
         "maxInputTokens": 128000,
         "maxOutputTokens": 16000
@@ -110,7 +111,7 @@ bun start
         "id": "deepseek-reasoner",
         "name": "DeepSeek Reasoner (Bridge)",
         "url": "http://127.0.0.1:7638/v1/chat/completions",
-        "toolCalling": false,
+        "toolCalling": true,
         "vision": false,
         "thinking": true,
         "maxInputTokens": 128000,
@@ -120,7 +121,7 @@ bun start
         "id": "deepseek-search",
         "name": "DeepSeek Search (Bridge)",
         "url": "http://127.0.0.1:7638/v1/chat/completions",
-        "toolCalling": false,
+        "toolCalling": true,
         "vision": false,
         "maxInputTokens": 128000,
         "maxOutputTokens": 16000
@@ -129,7 +130,7 @@ bun start
         "id": "deepseek-reasoner-search",
         "name": "DeepSeek Reasoner Search (Bridge)",
         "url": "http://127.0.0.1:7638/v1/chat/completions",
-        "toolCalling": false,
+        "toolCalling": true,
         "vision": false,
         "thinking": true,
         "maxInputTokens": 128000,
@@ -142,18 +143,39 @@ bun start
 
 ---
 
-## 3. 常见错误
+## 3. 工具调用
+
+桥支持 OpenAI 的 `tools`、`tool_choice`（`auto` / `none` / `required` / 指定函数）、`parallel_tool_calls` 和 `role:"tool"` 消息。客户端把 Tool Calling 打开即可。
+
+网页模型没有原生 function calling，桥会：
+
+- 在 prompt 顶部注入工具协议，要求模型在回复末尾输出 `<tool_calls>` JSON 块
+- 解析后转换为标准 `tool_calls`，并返回 `finish_reason:"tool_calls"`
+- 工具结果作为增量消息回传，继续复用同一个网页会话
+- 输出格式不合法时保留原文，按普通文本返回（`finish_reason:"stop"`）
+
+注意：
+
+- `tool_choice:"none"` 时本轮不向网页模型暴露工具，按普通对话回答
+- 工具定义变化会自动使用新的网页会话，避免旧协议污染
+- 单轮最多接受 8 个工具调用；`strict` 字段仅透传，不强制校验参数 schema
+
+---
+
+## 4. 常见错误
 
 | 报错 | 原因与处理 |
 |---|---|
-| `400 DeepSeekBridge does not support tools` | 客户端在发工具定义 → 关掉 Tool Calling，或换聊天型客户端 |
+| `400 tools.N.function...` | 工具定义不合法 → 检查 name、parameters 是否为 JSON Schema 对象 |
+| `400 tool_choice ... requires at least one tool` | `required` 但没有提供工具 → 补 `tools` 或改成 `auto` |
+| `400 messages.N.tool_call_id is required` | `role:"tool"` 消息缺少 `tool_call_id` → 使用返回的调用 id |
 | `400 Bad type of message content: image_url` | 不支持图片 → 去掉图片 |
 | `401 Not signed in / Session expired` | 到浏览器窗口重新登录 DeepSeek |
 | `503 Bridge not ready` | 浏览器还在启动/等登录，稍后重试 |
 | `429 Request queue is full` | 请求太频繁 → 降低频率、关自动补全 |
 | `504 First-token / Idle / Total timeout` | 网页端响应超时（60s 首 token、60s 静默、10min 总时长） |
 
-## 4. 验证连接
+## 5. 验证连接
 
 ```powershell
 curl.exe http://127.0.0.1:7638/healthz

@@ -4,6 +4,9 @@ import { getUserToken } from "../browser/auth";
 import { CompletionStream } from "../protocol/patch-stream";
 import type { CompletionOutcome } from "../protocol/patch-stream";
 import type { PromptMessage } from "../protocol/prompt";
+import { messageChars, renderIncremental } from "../protocol/prompt";
+import { ToolCallScanner } from "../protocol/tool-calls";
+import type { ToolCall } from "../protocol/tool-calls";
 import { solvePow, buildPowHeader } from "../pow/solve";
 import type { PowChallenge } from "../pow/solve";
 import { SessionStore, hashChain, hashMessages } from "./session-store";
@@ -145,6 +148,7 @@ interface CompletionRun {
     thinking: boolean;
     search: boolean;
     powHeader: string;
+    toolNames?: string[];
     signal?: AbortSignal;
 }
 
@@ -166,28 +170,23 @@ export class WebApiDriver implements ChatBackend {
         }
 
         const messages = opts.messages ?? null;
+        const toolsHash = opts.toolsHash ?? "";
         let reused: SessionRecord | null = null;
-        let lastUser: PromptMessage | null = null;
+        let newMessages: PromptMessage[] = [];
 
-        // 会话匹配：请求历史（去掉最后一条）必须与索引里的链完全一致，且最后一条是 assistant
-        if(messages !== null && messages.length >= 3 && this.store !== null) {
-            const last = messages[messages.length - 1]!;
-            const prefix = messages.slice(0, -1);
-            const prefixTail = prefix[prefix.length - 1]!;
-            if(last.role === "user" && last.content.length > 0
-                && prefix.length >= 2
-                && prefixTail.role === "assistant") {
-                const candidate = this.store.find(hashMessages(prefix), prefix.length);
-                if(candidate !== null) {
-                    if(this.store.charBudget > 0
-                        && candidate.chars + last.content.length > this.store.charBudget) {
-                        // 会话上下文超预算：放弃复用并清掉旧会话
-                        this.store.remove(candidate.id);
-                        void this.deleteSessions(token, [candidate.id]);
-                    } else {
-                        reused = candidate;
-                        lastUser = last;
-                    }
+        // 会话匹配：客户端历史里最长的、与索引记录一致的前缀；剩余部分作为本轮增量
+        if(messages !== null && this.store !== null) {
+            const match = this.store.match(messages, toolsHash);
+            if(match !== null) {
+                const extraChars = match.newMessages.reduce(
+                    (sum, message) => sum + messageChars(message), 0);
+                if(this.store.charBudget > 0
+                    && match.record.chars + extraChars > this.store.charBudget) {
+                    // 会话上下文超预算：放弃复用并清掉旧会话
+                    this.dropSession(token, match.record);
+                } else {
+                    reused = match.record;
+                    newMessages = match.newMessages;
                 }
             }
         }
@@ -195,10 +194,13 @@ export class WebApiDriver implements ChatBackend {
         let sessionId: string;
         let parentMessageId: number | null = null;
         let prompt = opts.prompt;
-        if(reused !== null && lastUser !== null) {
+        if(reused !== null) {
             sessionId = reused.id;
             parentMessageId = reused.parentMessageId;
-            prompt = lastUser.content;
+            prompt = renderIncremental(newMessages);
+            if(opts.toolDirective !== undefined && opts.toolDirective.length > 0) {
+                prompt += `\n\n${opts.toolDirective}`;
+            }
         } else {
             sessionId = await this.createSession(token);
         }
@@ -215,6 +217,7 @@ export class WebApiDriver implements ChatBackend {
                 thinking: opts.thinking ?? false,
                 search: opts.search ?? false,
                 powHeader,
+                toolNames: opts.toolNames,
                 signal
             });
 
@@ -239,7 +242,8 @@ export class WebApiDriver implements ChatBackend {
 
                 if(!("k" in first)) {
                     if(first.type === "done") {
-                        this.remember(token, opts, messages, reused, lastUser, sessionId, first.outcome);
+                        this.remember(token, opts, messages, reused, sessionId,
+                            first.outcome, first.content ?? first.outcome.text, first.toolCalls ?? []);
                     }
                     yield first;
                 }
@@ -249,7 +253,8 @@ export class WebApiDriver implements ChatBackend {
                     }
                     if(event.type === "done") {
                         // 必须在 yield 之前落盘：SSE 路由收到 done 后会直接 return 生成器
-                        this.remember(token, opts, messages, reused, lastUser, sessionId, event.outcome);
+                        this.remember(token, opts, messages, reused, sessionId,
+                            event.outcome, event.content ?? event.outcome.text, event.toolCalls ?? []);
                     }
                     yield event;
                 }
@@ -280,9 +285,10 @@ export class WebApiDriver implements ChatBackend {
         opts: ChatOptions,
         messages: PromptMessage[] | null,
         reused: SessionRecord | null,
-        lastUser: PromptMessage | null,
         sessionId: string,
-        outcome: CompletionOutcome | null
+        outcome: CompletionOutcome | null,
+        assistantContent: string,
+        toolCalls: ToolCall[]
     ): void {
         if(this.store === null || messages === null) {
             return;
@@ -292,8 +298,8 @@ export class WebApiDriver implements ChatBackend {
             && outcome.finished
             && outcome.responseMessageId !== null
             && last !== undefined
-            && last.role === "user"
-            && last.content.length > 0;
+            && (last.role === "user" || last.role === "tool")
+            && (assistantContent.length > 0 || toolCalls.length > 0);
 
         if(!usable) {
             if(reused !== null) {
@@ -302,18 +308,39 @@ export class WebApiDriver implements ChatBackend {
             return;
         }
 
-        const answer = outcome.text;
-        const chainHash = hashChain(hashMessages(messages), "assistant", answer);
-        const chars = (reused !== null
-            ? reused.chars + (lastUser?.content.length ?? 0)
-            : opts.prompt.length) + answer.length;
+        const assistant: PromptMessage = {
+            role: "assistant",
+            content: assistantContent
+        };
+        if(toolCalls.length > 0) {
+            assistant.toolCalls = toolCalls;
+        }
+        const assistantChars = messageChars(assistant);
+
+        let chainHash: string;
+        let chars: number;
+        if(reused !== null) {
+            const newMessages = messages.slice(reused.messageCount);
+            chainHash = reused.chainHash;
+            for(const message of newMessages) {
+                chainHash = hashChain(chainHash, message);
+            }
+            chainHash = hashChain(chainHash, assistant);
+            chars = reused.chars
+                + newMessages.reduce((sum, message) => sum + messageChars(message), 0)
+                + assistantChars;
+        } else {
+            chainHash = hashChain(hashMessages(messages), assistant);
+            chars = opts.prompt.length + assistantChars;
+        }
 
         const evicted = this.store.record({
             id: sessionId,
             chainHash,
             messageCount: messages.length + 1,
             parentMessageId: outcome.responseMessageId!,
-            chars
+            chars,
+            toolsHash: opts.toolsHash ?? ""
         });
 
         if(reused === null) {
@@ -565,6 +592,10 @@ export class WebApiDriver implements ChatBackend {
         }
 
         const stream = new CompletionStream();
+        const scanner = run.toolNames === undefined
+            ? null
+            : new ToolCallScanner(run.toolNames);
+        let filteredText = "";
 
         try {
             while(true) {
@@ -610,7 +641,15 @@ export class WebApiDriver implements ChatBackend {
                             if(firstDeltaAt === null) {
                                 firstDeltaAt = Date.now();
                             }
-                            yield delta;
+                            if(delta.type === "text" && scanner !== null) {
+                                const piece = scanner.push(delta.text);
+                                if(piece.length > 0) {
+                                    filteredText += piece;
+                                    yield { type: "text", text: piece };
+                                }
+                            } else {
+                                yield delta;
+                            }
                         }
                     }
                 }
@@ -620,7 +659,25 @@ export class WebApiDriver implements ChatBackend {
                 if(firstDeltaAt === null) {
                     firstDeltaAt = Date.now();
                 }
-                yield delta;
+                if(delta.type === "text" && scanner !== null) {
+                    const piece = scanner.push(delta.text);
+                    if(piece.length > 0) {
+                        filteredText += piece;
+                        yield { type: "text", text: piece };
+                    }
+                } else {
+                    yield delta;
+                }
+            }
+
+            let toolCalls: ToolCall[] = [];
+            if(scanner !== null) {
+                const final = scanner.finish();
+                if(final.content.length > 0) {
+                    filteredText += final.content;
+                    yield { type: "text", text: final.content };
+                }
+                toolCalls = final.toolCalls;
             }
 
             if(run.signal?.aborted) {
@@ -665,7 +722,13 @@ export class WebApiDriver implements ChatBackend {
                 }
             }
 
-            yield { type: "done", outcome: stream.outcome() };
+            const outcome = stream.outcome();
+            yield {
+                type: "done",
+                outcome,
+                toolCalls,
+                content: scanner !== null ? filteredText : outcome.text
+            };
         } finally {
             if(run.signal) {
                 run.signal.removeEventListener("abort", onAbort);
