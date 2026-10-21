@@ -150,6 +150,7 @@ bun start
 网页模型没有原生 function calling，桥会：
 
 - 在 prompt 顶部注入工具协议，要求模型在回复末尾输出 `<tool_calls>` JSON 块
+- 兼容 DeepSeek 原生 DSML 标记（如 `<｜DSML｜tool_calls>`），自动转换为标准 `tool_calls`
 - 解析后转换为标准 `tool_calls`，并返回 `finish_reason:"tool_calls"`
 - 工具结果作为增量消息回传，继续复用同一个网页会话
 - 输出格式不合法时保留原文，按普通文本返回（`finish_reason:"stop"`）

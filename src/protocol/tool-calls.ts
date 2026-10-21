@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import {
+    findDsmlClose,
+    findDsmlOpen,
+    parseDsmlBlock,
+    partialDsmlOpenSuffix
+} from "./dsml";
 
 export interface ToolDefinition {
     type: "function";
@@ -168,6 +174,18 @@ function parseToolCallBlock(raw: string, names: ReadonlySet<string>): ToolCall[]
     return calls;
 }
 
+function parseDsmlCalls(raw: string, names: ReadonlySet<string>): ToolCall[] | null {
+    const parsed = parseDsmlBlock(raw, names);
+    if(parsed === null) {
+        return null;
+    }
+    return parsed.map((call) => ({
+        id: newCallId(),
+        name: call.name,
+        arguments: call.arguments
+    }));
+}
+
 // 最长“可能是 OPEN_MARKER 前缀”的后缀长度，先扣住不发给客户端
 function partialMarkerSuffix(text: string, marker: string): number {
     const max = Math.min(text.length, marker.length - 1);
@@ -179,11 +197,23 @@ function partialMarkerSuffix(text: string, marker: string): number {
     return 0;
 }
 
-// 流式扫描器：过滤 <tool_calls> 块，解析成功后从 done 事件带出
+function partialOpenSuffix(text: string): number {
+    return Math.max(
+        partialMarkerSuffix(text, OPEN_MARKER),
+        partialDsmlOpenSuffix(text)
+    );
+}
+
+type BlockMode = "json" | "dsml";
+
+// 流式扫描器：过滤 <tool_calls> / DSML 块，解析成功后从 done 事件带出
 export class ToolCallScanner {
     private readonly names: ReadonlySet<string>;
     private pending = "";
     private block: string | null = null;
+    private mode: BlockMode | null = null;
+    private openRaw = "";
+    private closeRaw = "";
     private closed = false;
     private calls: ToolCall[] = [];
 
@@ -207,42 +237,81 @@ export class ToolCallScanner {
             }
 
             if(this.block === null) {
-                const openAt = this.pending.indexOf(OPEN_MARKER);
+                const jsonAt = this.pending.indexOf(OPEN_MARKER);
+                const dsml = findDsmlOpen(this.pending);
+                const dsmlAt = dsml?.index ?? -1;
+                let openAt = -1;
+                let openLength = 0;
+                let mode: BlockMode | null = null;
+
+                if(jsonAt !== -1 && (dsmlAt === -1 || jsonAt < dsmlAt)) {
+                    openAt = jsonAt;
+                    openLength = OPEN_MARKER.length;
+                    mode = "json";
+                } else if(dsml !== null) {
+                    openAt = dsml.index;
+                    openLength = dsml.length;
+                    mode = "dsml";
+                }
+
                 if(openAt === -1) {
-                    const keep = partialMarkerSuffix(this.pending, OPEN_MARKER);
+                    const keep = partialOpenSuffix(this.pending);
                     const emitLength = this.pending.length - keep;
                     output += this.pending.slice(0, emitLength);
                     this.pending = this.pending.slice(emitLength);
                     break;
                 }
+
                 output += this.pending.slice(0, openAt);
-                this.pending = this.pending.slice(openAt + OPEN_MARKER.length);
+                this.openRaw = this.pending.slice(openAt, openAt + openLength);
+                this.pending = this.pending.slice(openAt + openLength);
                 this.block = "";
+                this.mode = mode;
                 continue;
             }
 
-            const closeAt = this.pending.indexOf(CLOSE_MARKER);
-            if(closeAt === -1) {
-                // 闭合标记也可能被 chunk 切开：只扣住可能是其前缀的尾巴
-                const keep = partialMarkerSuffix(this.pending, CLOSE_MARKER);
-                const appendLength = this.pending.length - keep;
-                this.block += this.pending.slice(0, appendLength);
-                this.pending = this.pending.slice(appendLength);
-                break;
+            let parsed: ToolCall[] | null = null;
+            if(this.mode === "dsml") {
+                const close = findDsmlClose(this.pending);
+                if(close === null) {
+                    // 闭合标记可能跨 chunk：扣住足够长的尾巴等下一段
+                    const keep = Math.min(this.pending.length, 96);
+                    const appendLength = this.pending.length - keep;
+                    this.block += this.pending.slice(0, appendLength);
+                    this.pending = this.pending.slice(appendLength);
+                    break;
+                }
+                this.block += this.pending.slice(0, close.index);
+                this.closeRaw = this.pending.slice(close.index, close.index + close.length);
+                this.pending = this.pending.slice(close.index + close.length);
+                parsed = parseDsmlCalls(this.block, this.names);
+            } else {
+                const closeAt = this.pending.indexOf(CLOSE_MARKER);
+                if(closeAt === -1) {
+                    // 闭合标记也可能被 chunk 切开：只扣住可能是其前缀的尾巴
+                    const keep = partialMarkerSuffix(this.pending, CLOSE_MARKER);
+                    const appendLength = this.pending.length - keep;
+                    this.block += this.pending.slice(0, appendLength);
+                    this.pending = this.pending.slice(appendLength);
+                    break;
+                }
+                this.block += this.pending.slice(0, closeAt);
+                this.closeRaw = CLOSE_MARKER;
+                this.pending = this.pending.slice(closeAt + CLOSE_MARKER.length);
+                parsed = parseToolCallBlock(this.block, this.names);
             }
 
-            this.block += this.pending.slice(0, closeAt);
-            this.pending = this.pending.slice(closeAt + CLOSE_MARKER.length);
-
-            const parsed = parseToolCallBlock(this.block, this.names);
             if(parsed === null) {
                 // 格式不合法：原样当文本返回，避免静默丢内容
-                output += OPEN_MARKER + this.block + CLOSE_MARKER;
+                output += this.openRaw + this.block + this.closeRaw;
                 this.calls = [];
             } else {
                 this.calls = parsed;
             }
             this.block = null;
+            this.mode = null;
+            this.openRaw = "";
+            this.closeRaw = "";
             this.closed = true;
         }
 
@@ -253,8 +322,11 @@ export class ToolCallScanner {
         let output = "";
         if(this.block !== null) {
             // 块没有闭合：保留原文
-            output += OPEN_MARKER + this.block;
+            output += this.openRaw + this.block;
             this.block = null;
+            this.mode = null;
+            this.openRaw = "";
+            this.closeRaw = "";
             this.closed = true;
         } else if(!this.closed) {
             output += this.pending;

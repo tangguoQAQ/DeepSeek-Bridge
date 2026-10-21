@@ -128,3 +128,119 @@ test("空数组与超过 8 个调用视为非法", () => {
         "{\"name\":\"get_weather\",\"arguments\":{}}").join(",");
     expect(scan([`<tool_calls>[${many}]</tool_calls>`]).toolCalls).toEqual([]);
 });
+
+const BAR = "\uFF5C";
+
+// DeepSeek 官方格式：<｜DSML｜tool_calls> ...
+function dsml(tag: string, attrs = "", closing = false): string {
+    return `<${closing ? "/" : ""}${BAR}DSML${BAR}${tag}${attrs}>`;
+}
+
+// 客户端里出现的退化格式：双竖线 + 空格 + calls
+function dsmlDegraded(tag: string, attrs = "", closing = false): string {
+    return `<${closing ? "/" : ""}${BAR}${BAR}DSML${BAR}${BAR} ${tag}${attrs}>`;
+}
+
+test("DSML：官方 <｜DSML｜tool_calls> 格式", () => {
+    const raw = [
+        dsml("tool_calls"),
+        dsml("invoke", ' name="get_weather"'),
+        dsml("parameter", ' name="city" string="true"') + "北京" + dsml("parameter", "", true),
+        dsml("invoke", "", true),
+        dsml("tool_calls", "", true)
+    ].join("\n");
+
+    const result = scan([raw]);
+    expect(result.content).toBe("");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]!.name).toBe("get_weather");
+    expect(JSON.parse(result.toolCalls[0]!.arguments)).toEqual({ city: "北京" });
+});
+
+test("DSML：双竖线 + calls + 多参数的退化格式", () => {
+    const command = "$f='n:\\Projects\\DeepSeekBridge\\src\\server\\app.ts'; $lines=Get-Content -LiteralPath $f; $lines.Count";
+    const raw = [
+        dsmlDegraded("calls"),
+        dsmlDegraded("invoke", ' name="powershell"'),
+        dsmlDegraded("parameter", ' name="command" string="true"') + command + dsmlDegraded("parameter", "", true),
+        dsmlDegraded("parameter", ' name="description" string="true"') + "Count lines in app.ts" + dsmlDegraded("parameter", "", true),
+        dsmlDegraded("invoke", "", true),
+        dsmlDegraded("calls", "", true)
+    ].join("\n");
+
+    const result = scan([raw], ["powershell"]);
+    expect(result.content).toBe("");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]!.name).toBe("powershell");
+    expect(JSON.parse(result.toolCalls[0]!.arguments)).toEqual({
+        command,
+        description: "Count lines in app.ts"
+    });
+});
+
+test("DSML：多个 invoke、string=false 与非字符串参数", () => {
+    const raw = [
+        dsml("tool_calls"),
+        dsml("invoke", ' name="get_weather"'),
+        dsml("parameter", ' name="city" string="true"') + "北京" + dsml("parameter", "", true),
+        dsml("invoke", "", true),
+        dsml("invoke", ' name="get_weather"'),
+        dsml("parameter", ' name="city" string="true"') + "上海" + dsml("parameter", "", true),
+        dsml("parameter", ' name="count" string="false"') + "2" + dsml("parameter", "", true),
+        dsml("invoke", "", true),
+        dsml("tool_calls", "", true)
+    ].join("");
+
+    const calls = scan([raw]).toolCalls;
+    expect(calls).toHaveLength(2);
+    expect(JSON.parse(calls[0]!.arguments)).toEqual({ city: "北京" });
+    expect(JSON.parse(calls[1]!.arguments)).toEqual({ city: "上海", count: 2 });
+    expect(calls[0]!.id).not.toBe(calls[1]!.id);
+});
+
+test("DSML：开头/闭合标记跨 chunk 也能解析", () => {
+    const raw = "稍等\n"
+        + dsmlDegraded("calls")
+        + dsmlDegraded("invoke", ' name="get_weather"')
+        + dsmlDegraded("parameter", ' name="city" string="true"') + "广州" + dsmlDegraded("parameter", "", true)
+        + dsmlDegraded("invoke", "", true)
+        + dsmlDegraded("calls", "", true)
+        + "\n好了";
+
+    const chunks: string[] = [];
+    for(let i = 0; i < raw.length; i += 7) {
+        chunks.push(raw.slice(i, i + 7));
+    }
+    const result = scan(chunks);
+    expect(result.content.trim()).toBe("稍等\n\n好了");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(JSON.parse(result.toolCalls[0]!.arguments)).toEqual({ city: "广州" });
+});
+
+test("DSML：ASCII 双竖线与单引号属性", () => {
+    const raw = "<||DSML||tool_calls>"
+        + "<||DSML||invoke name='get_weather'>"
+        + "<||DSML||parameter name='city' string='true'>深圳</||DSML||parameter>"
+        + "</||DSML||invoke>"
+        + "</||DSML||tool_calls>";
+
+    const result = scan([raw]);
+    expect(result.content).toBe("");
+    expect(JSON.parse(result.toolCalls[0]!.arguments)).toEqual({ city: "深圳" });
+});
+
+test("DSML：未知工具/未闭合块原样当文本返回", () => {
+    const unknown = scan([
+        dsml("tool_calls"),
+        dsml("invoke", ' name="rm_rf"'),
+        dsml("invoke", "", true),
+        dsml("tool_calls", "", true)
+    ], ["get_weather"]);
+    expect(unknown.toolCalls).toEqual([]);
+    expect(unknown.content).toContain("rm_rf");
+
+    const open = dsml("tool_calls") + dsml("invoke", ' name="get_weather"');
+    const unclosed = scan([open]);
+    expect(unclosed.toolCalls).toEqual([]);
+    expect(unclosed.content).toContain("get_weather");
+});

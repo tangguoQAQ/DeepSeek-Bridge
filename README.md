@@ -35,6 +35,6 @@ bun check
 
 ## 工具调用
 
-支持 OpenAI 的 `tools`、`tool_choice`、`parallel_tool_calls` 与 `role:"tool"` 消息，客户端可直接开启 Tool Calling。工具调用由网页模型按桥注入的协议输出，再由桥转换为标准 `tool_calls`；工具定义变化会自动新建网页会话。配置与限制见 **[docs/clients.md](docs/clients.md#3-工具调用)**。
+支持 OpenAI 的 `tools`、`tool_choice`、`parallel_tool_calls` 与 `role:"tool"` 消息，客户端可直接开启 Tool Calling。工具调用由网页模型按桥注入的协议输出，再由桥转换为标准 `tool_calls`；同时兼容模型偶尔输出的 DeepSeek 原生 DSML 标记。工具定义变化会自动新建网页会话。配置与限制见 **[docs/clients.md](docs/clients.md#3-工具调用)**。
 
 This project was created using `bun init` in bun v1.4.3. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
