@@ -2,7 +2,7 @@ import { afterEach, test, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SessionStore, hashChain, hashMessages, GENESIS_HASH } from "../src/driver/session-store";
+import { SessionStore, hashChain, hashMessages, hashUserMessages, GENESIS_HASH } from "../src/driver/session-store";
 import type { PromptMessage } from "../src/protocol/prompt";
 
 const dirs: string[] = [];
@@ -107,7 +107,9 @@ test("索引落盘后可重新加载（含 toolsHash）", () => {
         messageCount: 2,
         parentMessageId: 7,
         chars: 20,
-        toolsHash: "abc"
+        toolsHash: "abc",
+        toolCallIds: ["call_1"],
+        userHash: "user-hash"
     });
 
     const second = store(filePath);
@@ -115,6 +117,8 @@ test("索引落盘后可重新加载（含 toolsHash）", () => {
     expect(found?.id).toBe("s1");
     expect(found?.parentMessageId).toBe(7);
     expect(found?.toolsHash).toBe("abc");
+    expect(found?.toolCallIds).toEqual(["call_1"]);
+    expect(found?.userHash).toBe("user-hash");
     expect(second.size).toBe(1);
 });
 
@@ -148,6 +152,105 @@ test("match 选择最长的、以 assistant 结尾的前缀", () => {
     expect(sessions.match(messages, "tools-x")).toBeNull();
 });
 
+test("工具结果在 system 变化后仍按 toolCallId 复用同一会话", () => {
+    const sessions = store(tempFile());
+    const call: PromptMessage = {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+    };
+    const first = [user("查天气"), call];
+    sessions.record({
+        id: "s1",
+        chainHash: hashMessages(first),
+        messageCount: first.length,
+        parentMessageId: 7,
+        chars: 100,
+        toolsHash: "tools-a",
+        toolCallIds: ["call_1"],
+        userHash: hashUserMessages(first)
+    });
+
+    const follow = [
+        { role: "system" as const, content: "客户端改写了 system" },
+        user("查天气"),
+        call,
+        tool("晴", "call_1")
+    ];
+    const matched = sessions.match(follow, "tools-a");
+    expect(matched?.record.id).toBe("s1");
+    expect(matched?.viaTool).toBe(true);
+    expect(matched?.newMessages).toEqual([tool("晴", "call_1")]);
+
+    // 工具列表变化也不应把工具结果拆到新会话
+    expect(sessions.match(follow, "tools-b")?.record.id).toBe("s1");
+    // 有些客户端只回传 tool 结果
+    expect(sessions.match([tool("晴", "call_1")], "tools-a")?.record.id).toBe("s1");
+});
+
+test("toolCallId 被客户端改写时可按用户消息指纹回退", () => {
+    const sessions = store(tempFile());
+    const call: PromptMessage = {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+    };
+    const first = [user("查天气"), call];
+    sessions.record({
+        id: "s1",
+        chainHash: hashMessages(first),
+        messageCount: first.length,
+        parentMessageId: 7,
+        chars: 100,
+        toolsHash: "tools-a",
+        toolCallIds: ["call_1"],
+        userHash: hashUserMessages(first)
+    });
+
+    const follow = [
+        { role: "system" as const, content: "changed" },
+        user("查天气"),
+        {
+            role: "assistant" as const,
+            content: "",
+            toolCalls: [{ id: "call_rewritten", name: "get_weather", arguments: "{}" }]
+        },
+        tool("晴", "call_rewritten")
+    ];
+    const matched = sessions.match(follow, "tools-a");
+    expect(matched?.record.id).toBe("s1");
+    expect(matched?.viaTool).toBe(true);
+    expect(matched?.newMessages).toEqual([tool("晴", "call_rewritten")]);
+});
+
+test("工具结果回退只对末尾 tool 消息生效", () => {
+    const sessions = store(tempFile());
+    const call: PromptMessage = {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+    };
+    const first = [user("查天气"), call];
+    sessions.record({
+        id: "s1",
+        chainHash: hashMessages(first),
+        messageCount: first.length,
+        parentMessageId: 7,
+        chars: 100,
+        toolsHash: "tools-a",
+        toolCallIds: ["call_1"],
+        userHash: hashUserMessages(first)
+    });
+
+    expect(sessions.match([
+        { role: "system", content: "changed" },
+        user("查天气"),
+        call,
+        tool("晴", "call_1"),
+        user("继续")
+    ], "tools-a")).toBeNull();
+});
+
 test("match 忽略不完整的 assistant 边界与完全相同的重复请求", () => {
     const sessions = store(tempFile());
     const chain = [user("你好"), assistant("你好！")];
@@ -178,6 +281,20 @@ test("超过 maxSessions 时淘汰最旧记录", () => {
     expect(evicted2.map((r) => r.id)).toEqual(["s1"]);
     expect(sessions.size).toBe(2);
     expect(sessions.find("a".repeat(64), 2, "")).toBeNull();
+});
+
+test("超出上限时保留刚复用的会话，淘汰最久未使用的", () => {
+    const sessions = store(tempFile(), { maxSessions: 2 });
+    sessions.record({ id: "s1", chainHash: "a".repeat(64), messageCount: 2, parentMessageId: 1, chars: 10, toolsHash: "" });
+    sessions.record({ id: "s2", chainHash: "b".repeat(64), messageCount: 2, parentMessageId: 2, chars: 10, toolsHash: "" });
+
+    // 复用 s1 后立即新建 s3；即使发生在同一毫秒，也应淘汰 s2
+    sessions.record({ id: "s1", chainHash: "c".repeat(64), messageCount: 4, parentMessageId: 3, chars: 20, toolsHash: "" });
+    const evicted = sessions.record({ id: "s3", chainHash: "d".repeat(64), messageCount: 2, parentMessageId: 4, chars: 10, toolsHash: "" });
+
+    expect(evicted.map((record) => record.id)).toEqual(["s2"]);
+    expect(sessions.find("c".repeat(64), 4, "")?.id).toBe("s1");
+    expect(sessions.find("d".repeat(64), 2, "")?.id).toBe("s3");
 });
 
 test("maxSessions = 0 表示不限制", () => {

@@ -9,7 +9,7 @@ import { ToolCallScanner } from "../protocol/tool-calls";
 import type { ToolCall } from "../protocol/tool-calls";
 import { solvePow, buildPowHeader } from "../pow/solve";
 import type { PowChallenge } from "../pow/solve";
-import { SessionStore, hashChain, hashMessages } from "./session-store";
+import { SessionStore, hashChain, hashMessages, hashUserMessages } from "./session-store";
 import type { SessionRecord } from "./session-store";
 import type { ChatBackend, ChatEvent, ChatOptions } from "./types";
 
@@ -180,13 +180,20 @@ export class WebApiDriver implements ChatBackend {
             if(match !== null) {
                 const extraChars = match.newMessages.reduce(
                     (sum, message) => sum + messageChars(message), 0);
+                const toolContinuation = match.viaTool
+                    || match.newMessages.some((message) => message.role === "tool");
                 if(this.store.charBudget > 0
-                    && match.record.chars + extraChars > this.store.charBudget) {
-                    // 会话上下文超预算：放弃复用并清掉旧会话
+                    && match.record.chars + extraChars > this.store.charBudget
+                    && !toolContinuation) {
+                    // 普通对话超预算：放弃复用并清掉旧会话；
+                    // 工具结果必须留在原会话里，否则完整 prompt 会被裁剪。
                     this.dropSession(token, match.record);
                 } else {
                     reused = match.record;
                     newMessages = match.newMessages;
+                    if(toolContinuation) {
+                        console.log("[session] Reusing session for tool result");
+                    }
                 }
             }
         }
@@ -203,6 +210,9 @@ export class WebApiDriver implements ChatBackend {
             }
         } else {
             sessionId = await this.createSession(token);
+            if(messages?.some((message) => message.role === "tool")) {
+                console.warn("[session] Tool result could not be matched; created a new session");
+            }
         }
 
         let powHeader = await this.preparePow(token);
@@ -243,7 +253,8 @@ export class WebApiDriver implements ChatBackend {
                 if(!("k" in first)) {
                     if(first.type === "done") {
                         this.remember(token, opts, messages, reused, sessionId,
-                            first.outcome, first.content ?? first.outcome.text, first.toolCalls ?? []);
+                            first.outcome, first.content ?? first.outcome.text, first.toolCalls ?? [],
+                            reused !== null ? newMessages : null);
                     }
                     yield first;
                 }
@@ -254,7 +265,8 @@ export class WebApiDriver implements ChatBackend {
                     if(event.type === "done") {
                         // 必须在 yield 之前落盘：SSE 路由收到 done 后会直接 return 生成器
                         this.remember(token, opts, messages, reused, sessionId,
-                            event.outcome, event.content ?? event.outcome.text, event.toolCalls ?? []);
+                            event.outcome, event.content ?? event.outcome.text, event.toolCalls ?? [],
+                            reused !== null ? newMessages : null);
                     }
                     yield event;
                 }
@@ -288,7 +300,8 @@ export class WebApiDriver implements ChatBackend {
         sessionId: string,
         outcome: CompletionOutcome | null,
         assistantContent: string,
-        toolCalls: ToolCall[]
+        toolCalls: ToolCall[],
+        reusedMessages: PromptMessage[] | null
     ): void {
         if(this.store === null || messages === null) {
             return;
@@ -317,22 +330,16 @@ export class WebApiDriver implements ChatBackend {
         }
         const assistantChars = messageChars(assistant);
 
-        let chainHash: string;
-        let chars: number;
-        if(reused !== null) {
-            const newMessages = messages.slice(reused.messageCount);
-            chainHash = reused.chainHash;
-            for(const message of newMessages) {
-                chainHash = hashChain(chainHash, message);
-            }
-            chainHash = hashChain(chainHash, assistant);
-            chars = reused.chars
-                + newMessages.reduce((sum, message) => sum + messageChars(message), 0)
-                + assistantChars;
-        } else {
-            chainHash = hashChain(hashMessages(messages), assistant);
-            chars = opts.prompt.length + assistantChars;
-        }
+        // 用当前客户端历史重新生成链 hash，确保 system 等变化后下一轮仍能精确命中
+        const chainHash = hashChain(hashMessages(messages), assistant);
+        const incremental = reused !== null
+            ? (reusedMessages ?? messages.slice(reused.messageCount))
+            : [];
+        const chars = reused !== null
+            ? reused.chars
+                + incremental.reduce((sum, message) => sum + messageChars(message), 0)
+                + assistantChars
+            : opts.prompt.length + assistantChars;
 
         const evicted = this.store.record({
             id: sessionId,
@@ -340,7 +347,9 @@ export class WebApiDriver implements ChatBackend {
             messageCount: messages.length + 1,
             parentMessageId: outcome.responseMessageId!,
             chars,
-            toolsHash: opts.toolsHash ?? ""
+            toolsHash: reused?.toolsHash ?? opts.toolsHash ?? "",
+            toolCallIds: toolCalls.map((call) => call.id),
+            userHash: hashUserMessages(messages)
         });
 
         if(reused === null) {

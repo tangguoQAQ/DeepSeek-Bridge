@@ -59,14 +59,85 @@ export function messageChars(msg: PromptMessage): number {
     return renderMessage(msg).length;
 }
 
+function buildHead(toolProtocol: string, systemText: string): string {
+    return `${HEADER}\n\n`
+        + (toolProtocol.length > 0 ? `${toolProtocol}\n\n` : "")
+        + (systemText.length > 0 ? `[System] ${systemText}\n\n` : "");
+}
+
+// 裁剪时优先保留最近的 user / assistant / tool 上下文，尤其是刚拿到的工具结果
+function findMandatoryStart(turns: readonly PromptMessage[]): number {
+    if(turns.length === 0) {
+        return 0;
+    }
+
+    let start = turns.length - 1;
+    if(turns[start]!.role === "tool") {
+        while(start > 0 && turns[start - 1]!.role === "tool") {
+            start--;
+        }
+        if(start > 0 && turns[start - 1]!.role === "assistant") {
+            start--;
+        }
+    } else if(turns[start]!.role === "user"
+        && start > 0
+        && turns[start - 1]!.role === "assistant") {
+        start--;
+    }
+
+    // 把触发工具调用/回答的用户问题一起带上
+    if(start > 0
+        && turns[start]!.role === "assistant"
+        && turns[start - 1]!.role === "user") {
+        start--;
+    }
+
+    // 如果最近上下文前面紧挨着工具结果，连同调用一起保留
+    if(start > 0 && turns[start - 1]!.role === "tool") {
+        start--;
+        while(start > 0 && turns[start - 1]!.role === "tool") {
+            start--;
+        }
+        if(start > 0 && turns[start - 1]!.role === "assistant") {
+            start--;
+        }
+        if(start > 0
+            && turns[start]!.role === "assistant"
+            && turns[start - 1]!.role === "user") {
+            start--;
+        }
+    }
+
+    return start;
+}
+
 function truncateMessage(msg: PromptMessage, limit: number): PromptMessage {
     if(renderMessage(msg).length <= limit) {
         return msg;
     }
-    const keep = Math.max(0, limit - ELLIPSIS.length - 32);
+
+    const emptyLength = renderMessage({
+        role: msg.role,
+        content: "",
+        toolCalls: msg.toolCalls,
+        toolCallId: msg.toolCallId
+    }).length;
+    const contentLimit = limit - emptyLength - ELLIPSIS.length;
+    if(contentLimit <= 0 || msg.content.length <= contentLimit) {
+        return msg;
+    }
+
+    // 保留开头和结尾：当前问题/工具结果的关键内容通常在末尾
+    const keepTail = contentLimit <= 1
+        ? contentLimit
+        : Math.max(1, Math.floor(contentLimit * 0.25));
+    const keepHead = contentLimit - keepTail;
     return {
         role: msg.role,
-        content: msg.content.slice(0, keep) + ELLIPSIS,
+        content: msg.content.slice(0, keepHead)
+            + ELLIPSIS
+            + (keepTail > 0 ? msg.content.slice(-keepTail) : ""),
+        toolCalls: msg.toolCalls,
         toolCallId: msg.toolCallId
     };
 }
@@ -105,31 +176,82 @@ export function buildPrompt(
         ? ""
         : buildToolProtocol(tooling.tools, tooling.toolChoice, tooling.parallelToolCalls);
 
-    const head = `${HEADER}\n\n`
-        + (toolProtocol.length > 0 ? `${toolProtocol}\n\n` : "")
-        + (systems.length > 0 ? `[System] ${systems.join("\n")}\n\n` : "");
-    let body = turns.map(renderMessage).join("");
+    let systemText = systems.join("\n");
+    let head = buildHead(toolProtocol, systemText);
+    const rendered = turns.map(renderMessage);
+    const bodyLength = rendered.reduce((total, text) => total + text.length, 0);
 
-    let truncated = false;
-    if(head.length + body.length > charBudget) {
-        truncated = true;
-
-        const first = turns.slice(0, 2);
-        const tail: PromptMessage[] = [];
-        let size = head.length + ELLIPSIS.length + 2
-            + first.map(renderMessage).join("").length;
-        for(let i = turns.length - 1; i >= 2; i--) {
-            const piece = renderMessage(turns[i]!);
-            if(size + piece.length > charBudget) {
-                break;
-            }
-            tail.unshift(turns[i]!);
-            size += piece.length;
-        }
-
-        body = first.map(renderMessage).join("") + ELLIPSIS + "\n\n" + tail.map(renderMessage).join("");
-        console.warn(`[prompt] History exceeds budget ${charBudget}. Truncated.`);
+    if(head.length + bodyLength <= charBudget) {
+        return { prompt: head + rendered.join(""), truncated: false };
     }
 
-    return { prompt: head + body, truncated };
+    const mandatoryStart = findMandatoryStart(turns);
+    const mandatoryLength = rendered
+        .slice(mandatoryStart)
+        .reduce((total, text) => total + text.length, 0);
+
+    // system 先让位：不能为了压缩上下文而丢掉刚返回的工具结果
+    if(head.length + mandatoryLength > charBudget && systemText.length > 0) {
+        const excess = head.length + mandatoryLength - charBudget;
+        const keep = Math.max(0, systemText.length - excess - ELLIPSIS.length - 16);
+        const keepStart = keep <= 1 ? 0 : Math.ceil(keep * 0.75);
+        const keepEnd = keep - keepStart;
+        systemText = systemText.slice(0, keepStart)
+            + ELLIPSIS
+            + (keepEnd > 0 ? systemText.slice(-keepEnd) : "");
+        head = buildHead(toolProtocol, systemText);
+    }
+
+    // 首轮上下文能放则放
+    let firstCount = 0;
+    if(mandatoryStart > 0) {
+        const maxFirst = Math.min(2, mandatoryStart);
+        for(let count = 1; count <= maxFirst; count++) {
+            const firstLength = rendered
+                .slice(0, count)
+                .reduce((total, text) => total + text.length, 0);
+            if(head.length + firstLength + mandatoryLength > charBudget) {
+                break;
+            }
+            firstCount = count;
+        }
+    }
+
+    // 剩余预算从新到旧填充
+    const firstLength = rendered
+        .slice(0, firstCount)
+        .reduce((total, text) => total + text.length, 0);
+    const optional: number[] = [];
+    let size = head.length + firstLength + mandatoryLength;
+    for(let i = mandatoryStart - 1; i >= firstCount; i--) {
+        const pieceLength = rendered[i]!.length;
+        if(size + pieceLength > charBudget) {
+            break;
+        }
+        optional.unshift(i);
+        size += pieceLength;
+    }
+
+    const followingStart = optional[0] ?? mandatoryStart;
+    const bodyParts: string[] = [];
+    for(let i = 0; i < firstCount; i++) {
+        bodyParts.push(rendered[i]!);
+    }
+    if(followingStart > firstCount) {
+        bodyParts.push(ELLIPSIS + "\n\n");
+    }
+    for(const i of optional) {
+        bodyParts.push(rendered[i]!);
+    }
+    for(let i = mandatoryStart; i < turns.length; i++) {
+        bodyParts.push(rendered[i]!);
+    }
+
+    const prompt = head + bodyParts.join("");
+    if(prompt.length > charBudget) {
+        console.warn(`[prompt] History still exceeds budget ${charBudget} after reserving latest turns (${prompt.length})`);
+    } else {
+        console.warn(`[prompt] History exceeds budget ${charBudget}. Truncated.`);
+    }
+    return { prompt, truncated: true };
 }

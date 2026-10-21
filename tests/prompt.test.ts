@@ -58,9 +58,87 @@ test("超预算从中间裁剪：保首轮与末尾", () => {
     expect(prompt.length).toBeLessThanOrEqual(2200);
 });
 
-test("单条消息超预算：截断并标注", () => {
-    const { prompt } = buildPrompt([user("啊".repeat(8000))], 3000);
+test("单条消息超预算：截断中间并保留结尾问题", () => {
+    const tail = "最后的问题";
+    const { prompt } = buildPrompt([user("啊".repeat(8000) + tail)], 3000);
     expect(prompt).toContain("……（截断部分）……");
+    expect(prompt).toContain(tail);
+    expect(prompt.endsWith(`${tail}\n\n`)).toBe(true);
+});
+
+test("工具结果超预算：保留末尾错误信息", () => {
+    const history: PromptMessage[] = [
+        user("执行检查"),
+        {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "call_1", name: "run", arguments: "{}" }]
+        },
+        {
+            role: "tool",
+            content: "日志 ".repeat(6000) + "错误码 E42",
+            toolCallId: "call_1"
+        }
+    ];
+
+    const { prompt } = buildPrompt(history, 3000);
+    expect(prompt).toContain("……（截断部分）……");
+    expect(prompt).toContain("错误码 E42");
+    expect(prompt.endsWith("错误码 E42\n\n")).toBe(true);
+});
+
+test("system 过长时优先压缩 system，保留最近的工具调用与结果", () => {
+    const history: PromptMessage[] = [
+        system(`系统说明 ${"x".repeat(8000)} 尾部规则`),
+        user("查天气"),
+        {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{\"city\":\"北京\"}" }]
+        },
+        { role: "tool", content: "晴，25°C", toolCallId: "call_1" }
+    ];
+
+    const { prompt, truncated } = buildPrompt(history, 6000);
+    expect(truncated).toBe(true);
+    expect(prompt).toContain("</tool_calls>");
+    expect(prompt).toContain("[Tool result id=call_1] 晴，25°C");
+    expect(prompt).toContain("尾部规则");
+    expect(prompt.length).toBeLessThanOrEqual(6000);
+});
+
+test("工具结果后的追问：保留工具结果、回答和最后一条 user", () => {
+    const history: PromptMessage[] = [
+        system(`系统说明 ${"x".repeat(8000)}`),
+        user("查天气"),
+        {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{\"city\":\"北京\"}" }]
+        },
+        { role: "tool", content: "晴，25°C", toolCallId: "call_1" },
+        assistant("北京晴，25°C。"),
+        user("适合跑步吗？")
+    ];
+
+    const { prompt } = buildPrompt(history, 6000);
+    expect(prompt).toContain("[Tool result id=call_1] 晴，25°C");
+    expect(prompt).toContain("[Assistant] 北京晴，25°C。");
+    expect(prompt.endsWith("[User] 适合跑步吗？\n\n")).toBe(true);
+    expect(prompt.length).toBeLessThanOrEqual(6000);
+});
+
+test("截断 assistant 内容时保留其中的 tool_calls", () => {
+    const message: PromptMessage = {
+        role: "assistant",
+        content: `说明 ${"x".repeat(5000)}`,
+        toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }]
+    };
+
+    const { prompt } = buildPrompt([user("查天气"), message], 3000);
+    expect(prompt).toContain("……（截断部分）……");
+    expect(prompt).toContain("<tool_calls>");
+    expect(prompt).toContain("\"name\":\"get_weather\"");
 });
 
 test("带 tools 时在 header 注入协议；不带则不注入", () => {
