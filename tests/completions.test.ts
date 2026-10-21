@@ -98,7 +98,8 @@ test("模型映射：search / 未知模型宽容处理", async () => {
     await runChatCompletion(parse("deepseek-search"), queue, fakeBackend({ record }), 24000);
     const unknown = await runChatCompletion(parse("gpt-4o"), queue, fakeBackend({ record }), 24000);
 
-    expect(record[0]).toEqual({ prompt: expect.any(String), thinking: false, search: true });
+    expect(record[0]).toMatchObject({ prompt: expect.any(String), thinking: false, search: true });
+    expect(record[0]!.messages).toEqual([{ role: "user", content: "你好" }]);
     expect(record[1]!.thinking).toBe(false);
     expect(record[1]!.search).toBe(false);
     expect(unknown.model).toBe("gpt-4o");

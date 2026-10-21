@@ -2,8 +2,12 @@ import type { Page } from "patchright";
 import { ApiError } from "../server/errors";
 import { getUserToken } from "../browser/auth";
 import { CompletionStream } from "../protocol/patch-stream";
+import type { CompletionOutcome } from "../protocol/patch-stream";
+import type { PromptMessage } from "../protocol/prompt";
 import { solvePow, buildPowHeader } from "../pow/solve";
 import type { PowChallenge } from "../pow/solve";
+import { SessionStore, hashChain, hashMessages } from "./session-store";
+import type { SessionRecord } from "./session-store";
 import type { ChatBackend, ChatEvent, ChatOptions } from "./types";
 
 const FIRST_TOKEN_TIMEOUT_MS = 60000;
@@ -15,6 +19,14 @@ class StreamTimeoutError extends Error {
     constructor() {
         super("Timed out waiting for stream data");
         this.name = "StreamTimeoutError";
+    }
+}
+
+// 会话在网页端被删除：completion 返回 HTTP 200 + biz_code=1
+class SessionInvalidError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "SessionInvalidError";
     }
 }
 
@@ -120,12 +132,31 @@ async function takeChannel(arg: { reqId: number; waitMs: number }): Promise<Take
     });
 }
 
+// runCompletion 内部事件：meta 用于判断 HTTP 状态（会话失效时回退），不对外暴露
+type RunEvent =
+    | { k: "meta"; status: number; contentType: string | null }
+    | ChatEvent;
+
+interface CompletionRun {
+    token: string;
+    sessionId: string;
+    parentMessageId: number | null;
+    prompt: string;
+    thinking: boolean;
+    search: boolean;
+    powHeader: string;
+    signal?: AbortSignal;
+}
+
 // M3 流式版：页面内 reader 逐块读取 → 页面积压 → take 长轮询拉回 → 进程侧增量事件（§5.2/§5.6）
 export class WebApiDriver implements ChatBackend {
     private reqSeq = 0;
     private readonly queues = new Map<number, PushQueue>();
 
-    constructor(private readonly page: Page) {}
+    constructor(
+        private readonly page: Page,
+        private readonly store: SessionStore | null = null
+    ) {}
 
     async *chat(opts: ChatOptions, signal?: AbortSignal): AsyncGenerator<ChatEvent> {
         const token = await getUserToken(this.page);
@@ -134,49 +165,225 @@ export class WebApiDriver implements ChatBackend {
                 "Not signed in. Please sign in to DeepSeek in the browser window and retry.");
         }
 
-        const boot: {
-            sessionId: string | null;
-            challenge: PowChallenge | null;
-            sessionStatus: number;
-            challengeStatus: number;
-        } = await this.page.evaluate(async (tok: string) => {
-            const headers = {
-                "content-type": "application/json",
-                authorization: "Bearer " + tok
-            };
+        const messages = opts.messages ?? null;
+        let reused: SessionRecord | null = null;
+        let lastUser: PromptMessage | null = null;
 
-            const sessionRes = await fetch("/api/v0/chat_session/create", {
-                method: "POST",
-                headers,
-                body: "{}"
-            });
-            const sessionJson = await sessionRes.json();
-            const sessionId = sessionJson?.data?.biz_data?.id ?? null;
-
-            const challengeRes = await fetch("/api/v0/chat/create_pow_challenge", {
-                method: "POST",
-                headers,
-                body: JSON.stringify({ target_path: "/api/v0/chat/completion" })
-            });
-            const challengeJson = await challengeRes.json();
-            const challenge = challengeJson?.data?.biz_data?.challenge ?? null;
-
-            return {
-                sessionId,
-                challenge,
-                sessionStatus: sessionRes.status,
-                challengeStatus: challengeRes.status
-            };
-        }, token);
-
-        if(boot.sessionId === null || boot.challenge === null) {
-            throw new ApiError(502, "api_error",
-                `Failed to create session / fetch PoW challenge (session HTTP ${boot.sessionStatus} / challenge HTTP ${boot.challengeStatus})`);
+        // 会话匹配：请求历史（去掉最后一条）必须与索引里的链完全一致，且最后一条是 assistant
+        if(messages !== null && messages.length >= 3 && this.store !== null) {
+            const last = messages[messages.length - 1]!;
+            const prefix = messages.slice(0, -1);
+            const prefixTail = prefix[prefix.length - 1]!;
+            if(last.role === "user" && last.content.length > 0
+                && prefix.length >= 2
+                && prefixTail.role === "assistant") {
+                const candidate = this.store.find(hashMessages(prefix), prefix.length);
+                if(candidate !== null) {
+                    if(this.store.charBudget > 0
+                        && candidate.chars + last.content.length > this.store.charBudget) {
+                        // 会话上下文超预算：放弃复用并清掉旧会话
+                        this.store.remove(candidate.id);
+                        void this.deleteSessions(token, [candidate.id]);
+                    } else {
+                        reused = candidate;
+                        lastUser = last;
+                    }
+                }
+            }
         }
 
-        const solved = await solvePow(boot.challenge);
-        const powHeader = buildPowHeader(boot.challenge, solved.answer);
+        let sessionId: string;
+        let parentMessageId: number | null = null;
+        let prompt = opts.prompt;
+        if(reused !== null && lastUser !== null) {
+            sessionId = reused.id;
+            parentMessageId = reused.parentMessageId;
+            prompt = lastUser.content;
+        } else {
+            sessionId = await this.createSession(token);
+        }
 
+        let powHeader = await this.preparePow(token);
+
+        // 复用会话可能已被网页端删除：HTTP 400/404 或 HTTP 200 + biz_code=1 时自动新建会话重试
+        while(true) {
+            const events = this.runCompletion({
+                token,
+                sessionId,
+                parentMessageId,
+                prompt,
+                thinking: opts.thinking ?? false,
+                search: opts.search ?? false,
+                powHeader,
+                signal
+            });
+
+            try {
+                const head = await events.next();
+                if(head.done) {
+                    return;
+                }
+
+                const first = head.value;
+                if(reused !== null && "k" in first && first.k === "meta"
+                    && (first.status === 400 || first.status === 404)) {
+                    await events.return(undefined);
+                    this.dropSession(token, reused);
+                    reused = null;
+                    sessionId = await this.createSession(token);
+                    parentMessageId = null;
+                    prompt = opts.prompt;
+                    powHeader = await this.preparePow(token);
+                    continue;
+                }
+
+                if(!("k" in first)) {
+                    if(first.type === "done") {
+                        this.remember(token, opts, messages, reused, lastUser, sessionId, first.outcome);
+                    }
+                    yield first;
+                }
+                for await (const event of events) {
+                    if("k" in event) {
+                        continue;
+                    }
+                    if(event.type === "done") {
+                        // 必须在 yield 之前落盘：SSE 路由收到 done 后会直接 return 生成器
+                        this.remember(token, opts, messages, reused, lastUser, sessionId, event.outcome);
+                    }
+                    yield event;
+                }
+                break;
+            } catch(err) {
+                if(reused !== null && err instanceof SessionInvalidError) {
+                    this.dropSession(token, reused);
+                    reused = null;
+                    sessionId = await this.createSession(token);
+                    parentMessageId = null;
+                    prompt = opts.prompt;
+                    powHeader = await this.preparePow(token);
+                    continue;
+                }
+                throw err;
+            }
+        }
+    }
+
+    private dropSession(token: string, record: SessionRecord): void {
+        this.store?.remove(record.id);
+        void this.deleteSessions(token, [record.id]);
+    }
+
+    // 成功完成后写入会话索引；部分完成或复用失败则丢弃记录
+    private remember(
+        token: string,
+        opts: ChatOptions,
+        messages: PromptMessage[] | null,
+        reused: SessionRecord | null,
+        lastUser: PromptMessage | null,
+        sessionId: string,
+        outcome: CompletionOutcome | null
+    ): void {
+        if(this.store === null || messages === null) {
+            return;
+        }
+        const last = messages[messages.length - 1];
+        const usable = outcome !== null
+            && outcome.finished
+            && outcome.responseMessageId !== null
+            && last !== undefined
+            && last.role === "user"
+            && last.content.length > 0;
+
+        if(!usable) {
+            if(reused !== null) {
+                this.store.remove(reused.id);
+            }
+            return;
+        }
+
+        const answer = outcome.text;
+        const chainHash = hashChain(hashMessages(messages), "assistant", answer);
+        const chars = (reused !== null
+            ? reused.chars + (lastUser?.content.length ?? 0)
+            : opts.prompt.length) + answer.length;
+
+        const evicted = this.store.record({
+            id: sessionId,
+            chainHash,
+            messageCount: messages.length + 1,
+            parentMessageId: outcome.responseMessageId!,
+            chars
+        });
+
+        if(reused === null) {
+            void this.tagSession(token, sessionId);
+        }
+        if(evicted.length > 0) {
+            console.log(`[session] Evicted ${evicted.length} old session(s) over limit`);
+            void this.deleteSessions(token, evicted.map((record) => record.id));
+        }
+    }
+
+    private async createSession(token: string): Promise<string> {
+        const result = await this.page.evaluate(async (tok: string) => {
+            const res = await fetch("/api/v0/chat_session/create", {
+                method: "POST",
+                headers: {
+                    "content-type": "application/json",
+                    authorization: "Bearer " + tok
+                },
+                body: "{}"
+            });
+            return { status: res.status, text: await res.text() };
+        }, token);
+
+        let sessionId: string | null = null;
+        try {
+            const json = JSON.parse(result.text) as Record<string, any>;
+            const biz = json?.data?.biz_data;
+            // 2026-10 起 id 位于 biz_data.chat_session.id，兼容旧版 biz_data.id
+            sessionId = biz?.chat_session?.id ?? biz?.id ?? null;
+        } catch {
+            // fall through
+        }
+        if(typeof sessionId !== "string" || sessionId.length === 0) {
+            throw new ApiError(502, "api_error",
+                `Failed to create chat session (HTTP ${result.status})`);
+        }
+        return sessionId;
+    }
+
+    private async preparePow(token: string): Promise<string> {
+        const result = await this.page.evaluate(async (tok: string) => {
+            const res = await fetch("/api/v0/chat/create_pow_challenge", {
+                method: "POST",
+                headers: {
+                    "content-type": "application/json",
+                    authorization: "Bearer " + tok
+                },
+                body: JSON.stringify({ target_path: "/api/v0/chat/completion" })
+            });
+            return { status: res.status, text: await res.text() };
+        }, token);
+
+        let challenge: PowChallenge | null = null;
+        try {
+            const json = JSON.parse(result.text) as Record<string, any>;
+            challenge = json?.data?.biz_data?.challenge ?? null;
+        } catch {
+            // fall through
+        }
+        if(challenge === null) {
+            throw new ApiError(502, "api_error",
+                `Failed to fetch PoW challenge (HTTP ${result.status})`);
+        }
+
+        const solved = await solvePow(challenge);
+        return buildPowHeader(challenge, solved.answer);
+    }
+
+    private async *runCompletion(run: CompletionRun): AsyncGenerator<RunEvent> {
         const reqId = ++this.reqSeq;
         const queue = new PushQueue();
         this.queues.set(reqId, queue);
@@ -186,6 +393,7 @@ export class WebApiDriver implements ChatBackend {
         let firstDeltaAt: number | null = null;
         let httpStatus = 0;
         let contentType: string | null = null;
+        let bodyText = "";
         let pageError: string | null = null;
         let pageDone = false;
 
@@ -193,6 +401,7 @@ export class WebApiDriver implements ChatBackend {
             reqId: number;
             token: string;
             sessionId: string;
+            parentMessageId: number | null;
             powHeader: string;
             prompt: string;
             thinking: boolean;
@@ -229,7 +438,7 @@ export class WebApiDriver implements ChatBackend {
                     },
                     body: JSON.stringify({
                         chat_session_id: arg.sessionId,
-                        parent_message_id: null,
+                        parent_message_id: arg.parentMessageId,
                         model_type: "default",
                         prompt: arg.prompt,
                         ref_file_ids: [],
@@ -278,12 +487,13 @@ export class WebApiDriver implements ChatBackend {
             return result;
         }, {
             reqId,
-            token,
-            sessionId: boot.sessionId,
-            powHeader,
-            prompt: opts.prompt,
-            thinking: opts.thinking ?? false,
-            search: opts.search ?? false,
+            token: run.token,
+            sessionId: run.sessionId,
+            parentMessageId: run.parentMessageId,
+            powHeader: run.powHeader,
+            prompt: run.prompt,
+            thinking: run.thinking,
+            search: run.search,
             totalTimeoutMs: TOTAL_TIMEOUT_MS
         });
 
@@ -308,23 +518,22 @@ export class WebApiDriver implements ChatBackend {
                     const take = await this.page.evaluate(takeChannel, {
                         reqId,
                         waitMs: TAKE_WAIT_MS
-                    }) as TakeResult;
+                    });
+                    if(take.k === "gone") {
+                        goneRetries++;
+                        if(goneRetries > 2) {
+                            break;
+                        }
+                        continue;
+                    }
+                    goneRetries = 0;
                     if(take.k === "data") {
                         for(const item of take.items) {
                             queue.push(item);
                         }
-                        continue;
+                    } else if(take.k === "end") {
+                        break;
                     }
-                    if(take.k === "idle") {
-                        continue;
-                    }
-                    if(take.k === "gone" && goneRetries < 3) {
-                        // 启动竞态兜底：通道可能还没建好
-                        goneRetries++;
-                        await new Promise((resolve) => setTimeout(resolve, 100));
-                        continue;
-                    }
-                    break;
                 }
             } catch(err) {
                 if(pageError === null) {
@@ -347,11 +556,11 @@ export class WebApiDriver implements ChatBackend {
             abortPage();
             queue.end();
         };
-        if(signal) {
-            if(signal.aborted) {
+        if(run.signal) {
+            if(run.signal.aborted) {
                 onAbort();
             } else {
-                signal.addEventListener("abort", onAbort, { once: true });
+                run.signal.addEventListener("abort", onAbort, { once: true });
             }
         }
 
@@ -388,13 +597,21 @@ export class WebApiDriver implements ChatBackend {
                     httpStatus = msg.status ?? 0;
                     contentType = msg.contentType ?? null;
                     lastDataAt = Date.now();
+                    yield { k: "meta", status: httpStatus, contentType };
                 } else if(msg.k === "chunk" && httpStatus === 200) {
                     lastDataAt = Date.now();
-                    for(const delta of stream.push(msg.text ?? "")) {
-                        if(firstDeltaAt === null) {
-                            firstDeltaAt = Date.now();
+                    const text = msg.text ?? "";
+                    if(contentType !== null && contentType.includes("application/json")) {
+                        if(bodyText.length < 8192) {
+                            bodyText += text;
                         }
-                        yield delta;
+                    } else {
+                        for(const delta of stream.push(text)) {
+                            if(firstDeltaAt === null) {
+                                firstDeltaAt = Date.now();
+                            }
+                            yield delta;
+                        }
                     }
                 }
             }
@@ -406,7 +623,7 @@ export class WebApiDriver implements ChatBackend {
                 yield delta;
             }
 
-            if(signal?.aborted) {
+            if(run.signal?.aborted) {
                 return;
             }
             if(httpStatus !== 200) {
@@ -428,10 +645,30 @@ export class WebApiDriver implements ChatBackend {
                 throw new ApiError(502, "api_error", `Stream read failed: ${pageError}`);
             }
 
+            // 会话失效/业务错误时 DeepSeek 返回 HTTP 200 + JSON（biz_code != 0）
+            if(contentType !== null && contentType.includes("application/json") && bodyText.length > 0) {
+                let bizCode: number | null = null;
+                let bizMsg = "";
+                try {
+                    const json = JSON.parse(bodyText) as Record<string, any>;
+                    bizCode = json?.data?.biz_code ?? null;
+                    bizMsg = String(json?.data?.biz_msg ?? "");
+                } catch {
+                    // ignore
+                }
+                if(bizCode !== null && bizCode !== 0) {
+                    if(bizMsg.toLowerCase().includes("invalid chat session")) {
+                        throw new SessionInvalidError(bizMsg);
+                    }
+                    throw new ApiError(502, "api_error",
+                        `Completion rejected by DeepSeek: ${bizMsg || "biz_code " + bizCode}`);
+                }
+            }
+
             yield { type: "done", outcome: stream.outcome() };
         } finally {
-            if(signal) {
-                signal.removeEventListener("abort", onAbort);
+            if(run.signal) {
+                run.signal.removeEventListener("abort", onAbort);
             }
             if(!pageDone) {
                 abortPage();
@@ -451,6 +688,64 @@ export class WebApiDriver implements ChatBackend {
             }, reqId);
         } catch {
             // ignore
+        }
+    }
+
+    private async tagSession(token: string, sessionId: string): Promise<void> {
+        const title = "DSB-" + sessionId.replace(/-/g, "").slice(0, 8);
+        try {
+            const result = await this.page.evaluate(async (arg: { token: string; sessionId: string; title: string }) => {
+                const res = await fetch("/api/v0/chat_session/update_title", {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        authorization: "Bearer " + arg.token
+                    },
+                    body: JSON.stringify({
+                        chat_session_id: arg.sessionId,
+                        title: arg.title
+                    })
+                });
+                return { status: res.status, text: await res.text() };
+            }, { token, sessionId, title });
+
+            const json = JSON.parse(result.text) as Record<string, any>;
+            if(json?.data?.biz_code !== 0) {
+                console.warn(`[session] Failed to tag session ${title} (biz_code ${json?.data?.biz_code})`);
+            }
+        } catch(err) {
+            console.warn(`[session] Failed to tag session ${title}: ${(err as Error).message}`);
+        }
+    }
+
+    private async deleteSessions(token: string, ids: string[]): Promise<void> {
+        if(ids.length === 0) {
+            return;
+        }
+        try {
+            const result = await this.page.evaluate(async (arg: { token: string; ids: string[] }) => {
+                const res = await fetch("/api/v0/chat_session/delete", {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        authorization: "Bearer " + arg.token
+                    },
+                    body: JSON.stringify({ chat_session_ids: arg.ids })
+                });
+                return { status: res.status, text: await res.text() };
+            }, { token, ids });
+
+            let bizCode = -1;
+            try {
+                bizCode = (JSON.parse(result.text) as Record<string, any>)?.data?.biz_code ?? -1;
+            } catch {
+                // ignore
+            }
+            if(bizCode !== 0) {
+                console.warn(`[session] Failed to delete ${ids.length} session(s) (HTTP ${result.status}, biz_code ${bizCode})`);
+            }
+        } catch(err) {
+            console.warn(`[session] Failed to delete sessions: ${(err as Error).message}`);
         }
     }
 

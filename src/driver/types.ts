@@ -1,7 +1,10 @@
 import type { CompletionOutcome } from "../protocol/patch-stream";
+import type { PromptMessage } from "../protocol/prompt";
 
 export interface ChatOptions {
     prompt: string;
+    // 客户端完整消息（用于会话复用匹配；缺省则每次新建会话）
+    messages?: PromptMessage[];
     thinking?: boolean;
     search?: boolean;
 }

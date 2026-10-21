@@ -14,6 +14,8 @@ const config: BridgeConfig = {
     browserChannel: "auto",
     minRequestIntervalMs: 0,
     promptCharBudget: 24000,
+    sessionReuse: true,
+    maxSessions: 16,
 };
 
 function makeState(): BridgeState {

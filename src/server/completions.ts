@@ -68,6 +68,7 @@ export async function runChatCompletion(
 
         for await (const event of backend.chat({
             prompt,
+            messages: req.messages,
             thinking: model.thinking,
             search: model.search
         })) {
@@ -105,6 +106,7 @@ export async function runChatCompletionStream(
     const release = await queue.acquire();
     const iterator = backend.chat({
         prompt,
+        messages: req.messages,
         thinking: model.thinking,
         search: model.search
     }, abort.signal);

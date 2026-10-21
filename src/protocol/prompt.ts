@@ -17,7 +17,7 @@ const PREFILL_NOTE = "（请继续完成上一条助手消息）";
 
 export function buildPrompt(
     messages: PromptMessage[],
-    charBudget = 24000,
+    charBudget = 128000
 ): BuildPromptResult {
     const systems: string[] = [];
     const turns: PromptMessage[] = [];

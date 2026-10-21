@@ -2,6 +2,7 @@ import { parseConfig } from "./config";
 import { createApp } from "./server/app";
 import { SerialQueue } from "./queue";
 import { WebApiDriver } from "./driver/web-api";
+import { SessionStore } from "./driver/session-store";
 import { launchChatBrowser } from "./browser/launcher";
 import { checkLogin, waitForLogin } from "./browser/auth";
 import type { BridgeConfig } from "./config";
@@ -111,5 +112,11 @@ try {
 }
 
 // ===== Driver =====
-backend = new WebApiDriver(browser.page);
-console.log("[boot] Driver attached, accepting requests.");
+const sessionStore = new SessionStore({
+    filePath: "./.cache/dsbridge-sessions.json",
+    maxSessions: config.maxSessions,
+    charBudget: config.promptCharBudget,
+    reuse: config.sessionReuse,
+});
+backend = new WebApiDriver(browser.page, sessionStore);
+console.log(`[boot] Driver attached, accepting requests. (session reuse: ${config.sessionReuse ? "on" : "off"}, max sessions: ${config.maxSessions})`);

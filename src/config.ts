@@ -12,6 +12,8 @@ export interface BridgeConfig {
     browserChannel: BrowserChannel;
     minRequestIntervalMs: number;
     promptCharBudget: number;
+    sessionReuse: boolean;
+    maxSessions: number;
 }
 
 function findArg(argv: string[], name: string): string | null {
@@ -31,6 +33,14 @@ export function parseConfig(argv: string[]): BridgeConfig {
         throw new Error(`Invalid --browser-channel: ${browserChannel}（auto/chrome/msedge/chromium）`);
     }
 
+    const promptCharBudget = 128000;
+
+    const maxSessionsRaw = findArg(argv, "max-sessions");
+    const maxSessions = maxSessionsRaw === null ? 16 : Number(maxSessionsRaw);
+    if(!Number.isInteger(maxSessions) || maxSessions < 0) {
+        throw new Error(`Invalid --max-sessions: ${maxSessionsRaw}`);
+    }
+
     return {
         port,
         host: findArg(argv, "host") ?? "127.0.0.1",
@@ -39,6 +49,8 @@ export function parseConfig(argv: string[]): BridgeConfig {
         headless: argv.includes("--headless"),
         browserChannel: browserChannel as BrowserChannel,
         minRequestIntervalMs: 1000,
-        promptCharBudget: 24000,
+        promptCharBudget,
+        sessionReuse: !argv.includes("--no-session-reuse"),
+        maxSessions,
     };
 }
